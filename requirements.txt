@@ -1,0 +1,9 @@
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+google-cloud-pubsub
+openai>=2.15.0,<3
+psycopg[binary]
+python-telegram-bot[webhooks]
+beautifulsoup4
+tiktoken
