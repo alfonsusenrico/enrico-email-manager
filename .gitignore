@@ -9,6 +9,16 @@ Thumbs.db
 # Environment files
 .env
 .env.*
+.venv/
+!.env.example
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
 
 # Logs and temp files
 *.log
@@ -19,3 +29,6 @@ Thumbs.db
 dist/
 build/
 node_modules/
+
+# Local secrets
+secrets/
