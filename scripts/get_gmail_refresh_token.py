@@ -25,6 +25,11 @@ def parse_args():
         default=8080,
         help="Local port for the OAuth redirect.",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not try to open a browser automatically.",
+    )
     return parser.parse_args()
 
 
@@ -44,6 +49,7 @@ def main():
         prompt="consent",
         access_type="offline",
         include_granted_scopes="true",
+        open_browser=not args.no_browser,
     )
 
     if not creds.refresh_token:
