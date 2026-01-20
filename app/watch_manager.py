@@ -4,6 +4,7 @@ import threading
 import time
 from typing import Dict
 
+from app.backoff import AccountBackoff
 from app.config import Settings
 from app.db import Database
 from app.gmail_client import GmailClient
@@ -28,6 +29,7 @@ class WatchManager:
         self._gmail_client = gmail_client
         self._accounts = accounts
         self._thread: threading.Thread | None = None
+        self._auth_backoff = AccountBackoff(base_seconds=300, max_seconds=3600)
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -44,6 +46,15 @@ class WatchManager:
             time.sleep(LOOP_INTERVAL_SECONDS)
 
     def _ensure_watch(self, account: AccountRuntime) -> None:
+        if self._auth_backoff.should_skip(account.account_id):
+            until = self._auth_backoff.next_ready_at(account.account_id)
+            until_text = until.isoformat() if until else "unknown"
+            logger.warning(
+                "Skipping watch renewal for %s due to auth backoff until %s",
+                account.email,
+                until_text,
+            )
+            return
         last_history_id, watch_expiration = self._db.get_account_state(account.account_id)
         now = dt.datetime.now(dt.timezone.utc)
         should_refresh = (
@@ -54,11 +65,27 @@ class WatchManager:
         if not should_refresh:
             return
 
-        response = self._gmail_client.watch_inbox(
-            refresh_token=account.refresh_token,
-            topic_name=self._settings.gmail_watch_topic,
-            label_ids=self._settings.gmail_watch_label_ids,
-        )
+        try:
+            response = self._gmail_client.watch_inbox(
+                refresh_token=account.refresh_token,
+                topic_name=self._settings.gmail_watch_topic,
+                label_ids=self._settings.gmail_watch_label_ids,
+            )
+        except Exception as exc:
+            if self._gmail_client.is_auth_error(exc):
+                delay = self._auth_backoff.record_failure(account.account_id)
+                until = self._auth_backoff.next_ready_at(account.account_id)
+                until_text = until.isoformat() if until else "unknown"
+                logger.exception(
+                    "Gmail auth error renewing watch for %s; backing off for %ds (until %s). "
+                    "Refresh token may be expired or revoked.",
+                    account.email,
+                    delay,
+                    until_text,
+                )
+                return
+            raise
+        self._auth_backoff.reset(account.account_id)
         history_id = int(response.get("historyId", last_history_id or 0))
         expiration_ms = int(response.get("expiration", 0))
         expiration = None

@@ -4,6 +4,7 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from app.backoff import AccountBackoff
 from app.categories import CATEGORY_ENUM
 from app.config import Settings
 from app.db import Database
@@ -40,6 +41,7 @@ class GmailSyncService:
         self._locks: Dict[str, threading.Lock] = {
             email: threading.Lock() for email in accounts
         }
+        self._auth_backoff = AccountBackoff(base_seconds=300, max_seconds=3600)
 
     def handle_pubsub_event(self, email_address: str, history_id: int) -> None:
         account = self._accounts.get(email_address)
@@ -49,6 +51,15 @@ class GmailSyncService:
 
         lock = self._locks[email_address]
         with lock:
+            if self._auth_backoff.should_skip(account.account_id):
+                until = self._auth_backoff.next_ready_at(account.account_id)
+                until_text = until.isoformat() if until else "unknown"
+                logger.warning(
+                    "Skipping sync for %s due to auth backoff until %s",
+                    account.email,
+                    until_text,
+                )
+                return
             self._sync_account(account, history_id)
 
     def _sync_account(self, account: AccountRuntime, history_id: int) -> None:
@@ -62,15 +73,26 @@ class GmailSyncService:
                 label_id=self._settings.gmail_watch_label_ids[0],
             )
         except Exception as exc:
+            if self._gmail_client.is_auth_error(exc):
+                self._record_auth_error(account, "history sync")
+                return
             if self._gmail_client.is_history_invalid(exc):
                 logger.warning(
                     "History invalid for %s. Resetting history cursor.", account.email
                 )
-                profile = self._gmail_client.get_profile(account.refresh_token)
+                try:
+                    profile = self._gmail_client.get_profile(account.refresh_token)
+                except Exception as profile_exc:
+                    if self._gmail_client.is_auth_error(profile_exc):
+                        self._record_auth_error(account, "profile fetch")
+                        return
+                    raise
+                self._auth_backoff.reset(account.account_id)
                 latest_history = int(profile.get("historyId", history_id))
                 self._db.update_last_history_id(account.account_id, latest_history)
                 return
             raise
+        self._auth_backoff.reset(account.account_id)
 
         message_ids = self._extract_message_ids(response)
         logger.info(
@@ -79,6 +101,8 @@ class GmailSyncService:
 
         for message_id in message_ids:
             self._process_message(account, message_id, history_id)
+            if self._auth_backoff.should_skip(account.account_id):
+                return
 
         latest_history_id = response.get("historyId")
         if latest_history_id:
@@ -202,9 +226,12 @@ class GmailSyncService:
                 status="notified",
             )
 
-        except Exception:
+        except Exception as exc:
             if placeholder_id:
                 self._db.delete_notification(placeholder_id)
+            if self._gmail_client.is_auth_error(exc):
+                self._record_auth_error(account, "message fetch")
+                return
             raise
 
     def _build_email_text(self, message) -> str:
@@ -272,4 +299,17 @@ class GmailSyncService:
             cached_input_cost=cached_input_cost,
             output_cost=output_cost,
             total_cost=total_cost,
+        )
+
+    def _record_auth_error(self, account: AccountRuntime, action: str) -> None:
+        delay = self._auth_backoff.record_failure(account.account_id)
+        until = self._auth_backoff.next_ready_at(account.account_id)
+        until_text = until.isoformat() if until else "unknown"
+        logger.exception(
+            "Gmail auth error for %s during %s; backing off for %ds (until %s). "
+            "Refresh token may be expired or revoked.",
+            account.email,
+            action,
+            delay,
+            until_text,
         )

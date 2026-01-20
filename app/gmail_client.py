@@ -3,6 +3,7 @@ import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -168,6 +169,40 @@ class GmailClient:
     def is_history_invalid(error: Exception) -> bool:
         if isinstance(error, HttpError):
             return error.resp.status == 404
+        return False
+
+    @staticmethod
+    def is_auth_error(error: Exception) -> bool:
+        if isinstance(error, RefreshError):
+            retryable = getattr(error, "retryable", False)
+            if retryable:
+                return False
+            return True
+
+        if isinstance(error, HttpError):
+            if error.resp.status in (401, 403):
+                return True
+            content = getattr(error, "content", None)
+            if content:
+                if isinstance(content, (bytes, bytearray)):
+                    content = content.decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(content)
+                except (TypeError, ValueError):
+                    return False
+                if isinstance(data, dict):
+                    if data.get("error") == "invalid_grant":
+                        return True
+                    error_info = data.get("error")
+                    if isinstance(error_info, dict):
+                        status = error_info.get("status")
+                        if status in ("UNAUTHENTICATED", "PERMISSION_DENIED"):
+                            return True
+                        errors = error_info.get("errors") or []
+                        for entry in errors:
+                            reason = entry.get("reason")
+                            if reason in ("authError", "invalidCredentials", "forbidden"):
+                                return True
         return False
 
     @staticmethod
