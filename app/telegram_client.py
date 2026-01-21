@@ -81,8 +81,19 @@ class TelegramClient:
     def build_open_url(thread_id: str, account_email: Optional[str] = None) -> str:
         if account_email:
             safe_email = quote(account_email, safe="")
-            return f"https://mail.google.com/mail/u/{safe_email}/#inbox/{thread_id}"
-        return f"https://mail.google.com/mail/u/0/#inbox/{thread_id}"
+            base_url = f"https://mail.google.com/mail/u/0/?authuser={safe_email}"
+            data_url = f"mail.google.com/mail/u/0/?authuser={safe_email}"
+        else:
+            base_url = "https://mail.google.com/mail/u/0/"
+            data_url = "mail.google.com/mail/u/0/"
+
+        web_url = f"{base_url}#inbox/{thread_id}"
+        fallback = quote(web_url, safe="")
+        return (
+            f"intent://{data_url}"
+            "#Intent;scheme=https;package=com.google.android.gm;"
+            f"S.browser_fallback_url={fallback};end"
+        )
 
     @staticmethod
     def build_keyboard(
