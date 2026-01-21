@@ -44,7 +44,7 @@ Defined in `migrations/0001_init.sql`.
 
 ## Workflow
 - Bootstrap: load `GMAIL_ACCOUNTS_JSON`, ensure each account exists in the DB, and schedule watch renewal.
-- Pub/Sub pull: parse historyId + emailAddress, fetch deltas via users.history.list, and dedupe by (account_id, gmail_message_id).
+- Pub/Sub pull: parse historyId + emailAddress, fetch deltas via users.history.list (label filter only when a single label is configured), and dedupe by (account_id, gmail_message_id).
 - Fetch + summarize: pull sender, snippet, and body text; compute sender_key; call OpenAI Responses API for summary/category/confidence.
 - Suppress + notify: apply suppression rules; send Telegram message with inline actions and store notification record + usage metrics.
 - Actions: archive (remove INBOX), trash with confirm, and not-interested suppression; update Telegram message status and reduce buttons to Open-only.
@@ -118,23 +118,28 @@ Strict JSON output:
 {
   "category": "Security",
   "confidence": 0.92,
-  "summary": "Concise assistant summary in up to 4 sentences."
+  "summary": "Concise assistant summary in 1-2 sentences."
 }
 ```
 
 Rules:
 - `category` must match one of the Category Enum values above.
 - `confidence` is 0.0 to 1.0.
-- `summary` should be concise (max 4 sentences), assistant-style, address the user directly, include important details when they appear in the body, and avoid email metadata unless it appears in the body.
+- `summary` should be 1-2 short sentences in a minimal assistant tone; keep only core information or required action, strip boilerplate (unsubscribe, marketing footers, legal text), and avoid email metadata unless it appears in the body.
+- For statements/bills, include statement type, amount due, minimum payment, and due date when present; add balances/points only if material.
+- For alerts, state what happened and what you should do (if anything).
 - Low-confidence classifications trigger a manual category picker and are always delivered.
 
 ### Telegram Actions
-- Open - open Gmail message in a browser.
+- Open - open Gmail message in a browser (Telegram in-app browser on mobile).
 - Archive - remove INBOX label and update message state in Telegram.
 - Trash (confirm) - confirm first, then move to Gmail Trash and update message state.
 - Not-Interested - suppress future messages by sender_key + category and update message state.
 - Low-confidence picker - manual category selection updates the category/confidence and removes picker buttons.
 Message format note: sender name only (no email), no subject line, no confidence shown, and primary buttons are on a single inline row.
+
+### Known Limitations
+- Telegram inline button URLs must be http/https, so the Open button cannot deep-link into the Gmail app; it opens the web view on mobile.
 
 ## Setup
 1) Clone
@@ -173,7 +178,7 @@ docker compose up --build -d
 | GMAIL_ACCOUNTS_JSON | Yes | `[{"email":"user@gmail.com","refresh_token":"..."}]` | JSON array of Gmail accounts and refresh tokens. |
 | GMAIL_WATCH_TOPIC | Yes | projects/<project-id>/topics/gmail-watch-topic | Topic used by users.watch. |
 | PUBSUB_SUBSCRIPTION | Yes | projects/<project-id>/subscriptions/gmail-watch-sub | Pull subscription to consume. |
-| GMAIL_WATCH_LABEL_IDS | No | INBOX | Label IDs to watch (INBOX only). |
+| GMAIL_WATCH_LABEL_IDS | No | INBOX | Comma-separated label IDs to watch (INBOX default). |
 | TELEGRAM_BOT_TOKEN | Yes | TBD | Bot token. |
 | TELEGRAM_WEBHOOK_BASE_URL | Yes | https://<cloudflared> | Cloudflared base URL; `/telegram/webhook` is appended by the service. |
 | TELEGRAM_WEBHOOK_SECRET_TOKEN | No | random-string | Enables Telegram webhook secret token validation. |
