@@ -67,10 +67,15 @@ class GmailSyncService:
         start_history_id = last_history_id or history_id
 
         try:
+            label_id = (
+                self._settings.gmail_watch_label_ids[0]
+                if len(self._settings.gmail_watch_label_ids) == 1
+                else None
+            )
             response = self._gmail_client.list_history(
                 account.refresh_token,
                 start_history_id=start_history_id,
-                label_id=self._settings.gmail_watch_label_ids[0],
+                label_id=label_id,
             )
         except Exception as exc:
             if self._gmail_client.is_auth_error(exc):
@@ -199,7 +204,9 @@ class GmailSyncService:
                 category=category,
                 note=note,
             )
-            open_url = self._telegram_client.build_open_url(gmail_message.thread_id)
+            open_url = self._telegram_client.build_open_url(
+                gmail_message.thread_id, account_email=account.email
+            )
             keyboard = self._telegram_client.build_keyboard(
                 notification_id=placeholder_id,
                 open_url=open_url,

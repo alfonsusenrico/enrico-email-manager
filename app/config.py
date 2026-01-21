@@ -30,6 +30,8 @@ class Settings:
     llm_low_confidence_threshold: float
     telegram_bot_token: str
     telegram_webhook_base_url: str
+    telegram_webhook_secret_token: str
+    telegram_allowed_user_ids: List[int]
     app_host: str
     app_port: int
     database_url: str
@@ -93,6 +95,21 @@ def _parse_float(value: str, name: str) -> float:
         raise ConfigError(f"{name} must be a number") from exc
 
 
+def _parse_int_list(raw_value: str, name: str) -> List[int]:
+    if not raw_value:
+        return []
+    values: List[int] = []
+    for part in raw_value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            values.append(int(item))
+        except ValueError as exc:
+            raise ConfigError(f"{name} must be a comma-separated list of integers") from exc
+    return values
+
+
 def load_settings() -> Settings:
     return Settings(
         gmail_watch_topic=_require_env("GMAIL_WATCH_TOPIC"),
@@ -127,6 +144,11 @@ def load_settings() -> Settings:
         ),
         telegram_bot_token=_require_env("TELEGRAM_BOT_TOKEN"),
         telegram_webhook_base_url=_require_env("TELEGRAM_WEBHOOK_BASE_URL"),
+        telegram_webhook_secret_token=os.getenv("TELEGRAM_WEBHOOK_SECRET_TOKEN", "").strip(),
+        telegram_allowed_user_ids=_parse_int_list(
+            os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""),
+            "TELEGRAM_ALLOWED_USER_IDS",
+        ),
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=_parse_int(os.getenv("APP_PORT", "8080"), "APP_PORT"),
         database_url=_require_env("DATABASE_URL"),

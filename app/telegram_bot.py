@@ -9,6 +9,7 @@ from app.categories import CATEGORY_ENUM
 from app.config import Settings, WEBHOOK_PATH
 from app.db import Database, Notification
 from app.gmail_client import GmailClient
+from app.gmail_sync import AccountRuntime
 from app.telegram_client import TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     chat_id = update.effective_chat.id
     db: Database = context.application.bot_data["db"]
+    settings: Settings = context.application.bot_data["settings"]
+    if not _is_authorized(update, settings):
+        logger.warning("Unauthorized /start from user %s", _safe_user_id(update))
+        if update.message:
+            await update.message.reply_text("Not authorized.")
+        return
     db.set_telegram_chat_id(chat_id)
     if update.message:
         await update.message.reply_text("Chat registered. You're all set.")
@@ -32,10 +39,10 @@ def _parse_notification_id(value: str) -> Optional[int]:
 
 
 def _notification_open_url(
-    telegram_client: TelegramClient, notification: Notification
+    telegram_client: TelegramClient, notification: Notification, account_email: str
 ) -> str:
     target_id = notification.gmail_thread_id or notification.gmail_message_id
-    return telegram_client.build_open_url(target_id)
+    return telegram_client.build_open_url(target_id, account_email=account_email)
 
 
 def _format_notification(
@@ -78,6 +85,21 @@ def _is_query_match(query, notification: Notification) -> bool:
     return True
 
 
+def _safe_user_id(update: Update) -> str:
+    if update.effective_user:
+        return str(update.effective_user.id)
+    return "unknown"
+
+
+def _is_authorized(update: Update, settings: Settings) -> bool:
+    if not settings.telegram_allowed_user_ids:
+        return True
+    user = update.effective_user
+    if not user:
+        return False
+    return user.id in settings.telegram_allowed_user_ids
+
+
 async def _get_notification(
     db: Database, notification_id: int
 ) -> Optional[Notification]:
@@ -104,7 +126,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     settings: Settings = context.application.bot_data["settings"]
     gmail_client: GmailClient = context.application.bot_data["gmail_client"]
     telegram_client: TelegramClient = context.application.bot_data["telegram_client"]
-    accounts_by_id: Dict[int, str] = context.application.bot_data["accounts_by_id"]
+    accounts_by_id: Dict[int, AccountRuntime] = context.application.bot_data[
+        "accounts_by_id"
+    ]
+    if not _is_authorized(update, settings):
+        logger.warning("Unauthorized callback from user %s", _safe_user_id(update))
+        return
 
     if action == "c":
         if len(parts) != 2:
@@ -120,12 +147,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not notification or not _is_query_match(query, notification):
             return
 
+        account_runtime = accounts_by_id.get(notification.account_id)
+        if not account_runtime:
+            logger.warning("Missing account runtime for notification %s", notification.id)
+            return
+
         category = CATEGORY_ENUM[category_idx]
         await asyncio.to_thread(
             db.update_notification_category, notification.id, category, 1.0
         )
 
-        open_url = _notification_open_url(telegram_client, notification)
+        open_url = _notification_open_url(
+            telegram_client, notification, account_runtime.email
+        )
         keyboard = telegram_client.build_keyboard(
             notification_id=notification.id,
             open_url=open_url,
@@ -150,10 +184,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not notification or not _is_query_match(query, notification):
         return
 
-    refresh_token = accounts_by_id.get(notification.account_id)
-    if not refresh_token:
-        logger.warning("Missing refresh token for notification %s", notification.id)
+    account_runtime = accounts_by_id.get(notification.account_id)
+    if not account_runtime:
+        logger.warning("Missing account runtime for notification %s", notification.id)
         return
+    refresh_token = account_runtime.refresh_token
 
     if action == "a":
         await asyncio.to_thread(
@@ -163,7 +198,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             notification.gmail_thread_id,
         )
         await asyncio.to_thread(db.update_notification_status, notification.id, "archived")
-        open_url = _notification_open_url(telegram_client, notification)
+        open_url = _notification_open_url(
+            telegram_client, notification, account_runtime.email
+        )
         keyboard = telegram_client.build_open_only_keyboard(open_url)
         message_text = _format_notification(
             telegram_client, notification, status="Archived"
@@ -174,7 +211,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if action == "t":
         keyboard = telegram_client.build_keyboard(
             notification_id=notification.id,
-            open_url=_notification_open_url(telegram_client, notification),
+            open_url=_notification_open_url(
+                telegram_client, notification, account_runtime.email
+            ),
             include_categories=False,
             categories=CATEGORY_ENUM,
             confirm_trash=True,
@@ -186,7 +225,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         include_categories = _low_confidence(notification, settings)
         keyboard = telegram_client.build_keyboard(
             notification_id=notification.id,
-            open_url=_notification_open_url(telegram_client, notification),
+            open_url=_notification_open_url(
+                telegram_client, notification, account_runtime.email
+            ),
             include_categories=include_categories,
             categories=CATEGORY_ENUM,
         )
@@ -201,7 +242,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             notification.gmail_thread_id,
         )
         await asyncio.to_thread(db.update_notification_status, notification.id, "trashed")
-        open_url = _notification_open_url(telegram_client, notification)
+        open_url = _notification_open_url(
+            telegram_client, notification, account_runtime.email
+        )
         keyboard = telegram_client.build_open_only_keyboard(open_url)
         message_text = _format_notification(
             telegram_client, notification, status="Trashed"
@@ -221,7 +264,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await asyncio.to_thread(
             db.update_notification_status, notification.id, "not_interested"
         )
-        open_url = _notification_open_url(telegram_client, notification)
+        open_url = _notification_open_url(
+            telegram_client, notification, account_runtime.email
+        )
         keyboard = telegram_client.build_open_only_keyboard(open_url)
         message_text = _format_notification(
             telegram_client, notification, status="Not-Interested"
@@ -234,7 +279,7 @@ def run_webhook(
     db: Database,
     gmail_client: GmailClient,
     telegram_client: TelegramClient,
-    accounts_by_id: Dict[int, str],
+    accounts_by_id: Dict[int, AccountRuntime],
 ) -> None:
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.bot_data["db"] = db
@@ -248,11 +293,13 @@ def run_webhook(
 
     webhook_url = settings.telegram_webhook_url
     url_path = WEBHOOK_PATH.lstrip("/")
+    secret_token = settings.telegram_webhook_secret_token or None
 
     application.run_webhook(
         listen=settings.app_host,
         port=settings.app_port,
         webhook_url=webhook_url,
         url_path=url_path,
+        secret_token=secret_token,
         drop_pending_updates=True,
     )

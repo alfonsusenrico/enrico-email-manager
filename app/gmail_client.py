@@ -65,31 +65,23 @@ class GmailClient:
             service.users().messages().trash(userId="me", id=message_id).execute()
 
     def list_history(
-        self, refresh_token: str, start_history_id: int, label_id: str
+        self, refresh_token: str, start_history_id: int, label_id: Optional[str] = None
     ) -> Dict:
         service = self.build_service(refresh_token)
-        response = service.users().history().list(
-            userId="me",
-            startHistoryId=start_history_id,
-            historyTypes=["messageAdded"],
-            labelId=label_id,
-        ).execute()
+        list_kwargs = {
+            "userId": "me",
+            "startHistoryId": start_history_id,
+            "historyTypes": ["messageAdded"],
+        }
+        if label_id:
+            list_kwargs["labelId"] = label_id
+        response = service.users().history().list(**list_kwargs).execute()
 
         histories = response.get("history", [])
         next_page_token = response.get("nextPageToken")
         while next_page_token:
-            page = (
-                service.users()
-                .history()
-                .list(
-                    userId="me",
-                    startHistoryId=start_history_id,
-                    historyTypes=["messageAdded"],
-                    labelId=label_id,
-                    pageToken=next_page_token,
-                )
-                .execute()
-            )
+            list_kwargs["pageToken"] = next_page_token
+            page = service.users().history().list(**list_kwargs).execute()
             histories.extend(page.get("history", []))
             next_page_token = page.get("nextPageToken")
             if page.get("historyId"):

@@ -36,9 +36,7 @@ def main() -> None:
         )
         for account in settings.gmail_accounts
     }
-    accounts_by_id = {
-        runtime.account_id: runtime.refresh_token for runtime in accounts.values()
-    }
+    accounts_by_id = {runtime.account_id: runtime for runtime in accounts.values()}
 
     gmail_client = GmailClient(
         client_secret_path=settings.gmail_oauth_client_secret_json,

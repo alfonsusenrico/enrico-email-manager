@@ -2,6 +2,7 @@ import asyncio
 import threading
 from dataclasses import dataclass
 from typing import Iterable, Optional
+from urllib.parse import quote
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -77,7 +78,10 @@ class TelegramClient:
         return "\n".join(lines)
 
     @staticmethod
-    def build_open_url(thread_id: str) -> str:
+    def build_open_url(thread_id: str, account_email: Optional[str] = None) -> str:
+        if account_email:
+            safe_email = quote(account_email, safe="")
+            return f"https://mail.google.com/mail/u/{safe_email}/#inbox/{thread_id}"
         return f"https://mail.google.com/mail/u/0/#inbox/{thread_id}"
 
     @staticmethod

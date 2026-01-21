@@ -92,6 +92,7 @@ The script prints a refresh token. Copy it into `.env` and add it to `GMAIL_ACCO
 
 ### Telegram Setup
 Set `TELEGRAM_WEBHOOK_BASE_URL` to your Cloudflared base URL (no path). The service appends `/telegram/webhook` when registering the webhook and listens on `APP_HOST`/`APP_PORT` (defaults `0.0.0.0:8080`). The first inbound message from your account (send `/start`) is used to register the chat ID.
+Optional hardening: set `TELEGRAM_WEBHOOK_SECRET_TOKEN` (Telegram secret header) and `TELEGRAM_ALLOWED_USER_IDS` (comma-separated Telegram user IDs allowed to use `/start` and callbacks).
 
 ### Gmail Accounts
 The app supports multiple Gmail accounts and posts them to the same Telegram chat. Run the refresh token helper once per account and add them to `.env` using `GMAIL_ACCOUNTS_JSON`:
@@ -175,6 +176,8 @@ docker compose up --build -d
 | GMAIL_WATCH_LABEL_IDS | No | INBOX | Label IDs to watch (INBOX only). |
 | TELEGRAM_BOT_TOKEN | Yes | TBD | Bot token. |
 | TELEGRAM_WEBHOOK_BASE_URL | Yes | https://<cloudflared> | Cloudflared base URL; `/telegram/webhook` is appended by the service. |
+| TELEGRAM_WEBHOOK_SECRET_TOKEN | No | random-string | Enables Telegram webhook secret token validation. |
+| TELEGRAM_ALLOWED_USER_IDS | No | 123456789 | Comma-separated Telegram user IDs allowed to register/use the bot. |
 | OPENAI_API_KEY | Yes | TBD | OpenAI API key. |
 | OPENAI_MODEL | No | gpt-5-mini | Responses API model name. |
 | OPENAI_PRICE_INPUT_PER_1M | Yes | 0.25 | USD per 1M input tokens. |
