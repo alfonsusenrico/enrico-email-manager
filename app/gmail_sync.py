@@ -1,6 +1,8 @@
 import datetime as dt
 import logging
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -42,6 +44,17 @@ class GmailSyncService:
             email: threading.Lock() for email in accounts
         }
         self._auth_backoff = AccountBackoff(base_seconds=300, max_seconds=3600)
+        self._digest_stop = threading.Event()
+        self._digest_thread: Optional[threading.Thread] = None
+
+    def start_background_workers(self) -> None:
+        if not self._settings.digest_enabled:
+            return
+        if self._digest_thread and self._digest_thread.is_alive():
+            return
+        self._digest_thread = threading.Thread(target=self._digest_loop, daemon=True)
+        self._digest_thread.start()
+        logger.info("Digest worker started")
 
     def handle_pubsub_event(self, email_address: str, history_id: int) -> None:
         account = self._accounts.get(email_address)
@@ -158,8 +171,12 @@ class GmailSyncService:
             confidence = llm_result.confidence
 
             sender_key = gmail_message.sender_email.lower()
+            sender_domain = sender_key.split("@", 1)[1] if "@" in sender_key else sender_key
             suppressed = self._db.is_suppressed(
-                account.account_id, sender_key=sender_key, category=category
+                account.account_id,
+                sender_key=sender_key,
+                sender_domain=sender_domain,
+                category=category,
             )
             if suppressed and confidence >= self._settings.llm_low_confidence_threshold:
                 self._db.update_notification_details(
@@ -171,6 +188,7 @@ class GmailSyncService:
                     summary=llm_result.summary,
                     category=category,
                     confidence=confidence,
+                    importance=llm_result.importance,
                     telegram_chat_id=None,
                     telegram_message_id=None,
                     status="suppressed",
@@ -189,6 +207,7 @@ class GmailSyncService:
                     summary=llm_result.summary,
                     category=category,
                     confidence=confidence,
+                    importance=llm_result.importance,
                     telegram_chat_id=None,
                     telegram_message_id=None,
                     status="pending",
@@ -196,6 +215,26 @@ class GmailSyncService:
                 return
 
             low_confidence = confidence < self._settings.llm_low_confidence_threshold
+            if (
+                self._settings.digest_enabled
+                and llm_result.importance == "low"
+                and not low_confidence
+            ):
+                self._db.update_notification_details(
+                    notification_id=placeholder_id,
+                    sender_email=gmail_message.sender_email,
+                    sender_name=gmail_message.sender_name,
+                    sender_key=sender_key,
+                    subject=gmail_message.subject,
+                    summary=llm_result.summary,
+                    category=category,
+                    confidence=confidence,
+                    importance=llm_result.importance,
+                    telegram_chat_id=None,
+                    telegram_message_id=None,
+                    status="digest_queued",
+                )
+                return
             note = "Low confidence - please choose a category below." if low_confidence else None
             message_text = self._telegram_client.format_message(
                 sender_name=gmail_message.sender_name,
@@ -203,6 +242,7 @@ class GmailSyncService:
                 summary=llm_result.summary,
                 category=category,
                 note=note,
+                importance=llm_result.importance,
             )
             open_url = self._telegram_client.build_open_url(
                 gmail_message.thread_id, account_email=account.email
@@ -228,6 +268,7 @@ class GmailSyncService:
                 summary=llm_result.summary,
                 category=category,
                 confidence=confidence,
+                importance=llm_result.importance,
                 telegram_chat_id=chat_id,
                 telegram_message_id=result.message_id,
                 status="notified",
@@ -307,6 +348,42 @@ class GmailSyncService:
             output_cost=output_cost,
             total_cost=total_cost,
         )
+
+    def _digest_loop(self) -> None:
+        while not self._digest_stop.is_set():
+            try:
+                self._flush_digest()
+            except Exception:
+                logger.exception("Digest flush failed")
+            self._digest_stop.wait(max(60, self._settings.digest_interval_minutes * 60))
+
+    def _flush_digest(self) -> None:
+        chat_id = self._db.get_telegram_chat_id()
+        if not chat_id:
+            return
+        items = self._db.get_digest_candidates(limit=50)
+        if not items:
+            return
+
+        grouped: Dict[str, List] = {}
+        for item in items:
+            grouped.setdefault(item.account_email, []).append(item)
+
+        for account_email, rows in grouped.items():
+            digest_id = str(uuid.uuid4())
+            lines = [f"📬 Digest ({account_email})", ""]
+            for idx, row in enumerate(rows[:10], start=1):
+                lines.append(
+                    f"{idx}. [{row.category}] {row.sender_name} — {row.summary}"
+                )
+            if len(rows) > 10:
+                lines.append(f"…and {len(rows) - 10} more")
+            text = "\n".join(lines)
+            keyboard = self._telegram_client.build_open_only_keyboard(
+                self._telegram_client.build_inbox_url(account_email=account_email)
+            )
+            self._telegram_client.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+            self._db.mark_digest_sent([r.notification_id for r in rows], digest_id)
 
     def _record_auth_error(self, account: AccountRuntime, action: str) -> None:
         delay = self._auth_backoff.record_failure(account.account_id)

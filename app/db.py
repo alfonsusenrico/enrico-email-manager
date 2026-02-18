@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 import psycopg
 
@@ -124,9 +124,11 @@ class Database:
         summary: str,
         category: str,
         confidence: float,
+        importance: str,
         telegram_chat_id: Optional[int],
         telegram_message_id: Optional[int],
         status: str,
+        digest_group_id: Optional[str] = None,
     ) -> None:
         with self.connect() as conn:
             with conn.cursor() as cur:
@@ -140,10 +142,13 @@ class Database:
                            summary = %s,
                            category = %s,
                            confidence = %s,
+                           importance = %s,
+                           digest_group_id = coalesce(%s, digest_group_id),
                            telegram_chat_id = %s,
                            telegram_message_id = %s,
                            status = %s,
                            delivered_at = case when %s then now() else delivered_at end,
+                           digested_at = case when %s then now() else digested_at end,
                            updated_at = now()
                      where id = %s
                     """,
@@ -155,10 +160,13 @@ class Database:
                         summary,
                         category,
                         confidence,
+                        importance,
+                        digest_group_id,
                         telegram_chat_id,
                         telegram_message_id,
                         status,
                         status == "notified",
+                        status == "digested",
                         notification_id,
                     ),
                 )
@@ -180,6 +188,7 @@ class Database:
                            summary,
                            category,
                            confidence,
+                           importance,
                            status,
                            telegram_chat_id,
                            telegram_message_id
@@ -203,9 +212,10 @@ class Database:
                     summary=row[8],
                     category=row[9],
                     confidence=row[10],
-                    status=row[11],
-                    telegram_chat_id=row[12],
-                    telegram_message_id=row[13],
+                    importance=row[11],
+                    status=row[12],
+                    telegram_chat_id=row[13],
+                    telegram_message_id=row[14],
                 )
 
     def update_notification_status(self, notification_id: int, status: str) -> None:
@@ -246,26 +256,106 @@ class Database:
                 )
             conn.commit()
 
+    def update_notification_importance(self, notification_id: int, importance: str) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update notifications
+                       set importance = %s,
+                           updated_at = now()
+                     where id = %s
+                    """,
+                    (importance, notification_id),
+                )
+            conn.commit()
+
+    def get_digest_candidates(self, limit: int = 50) -> List["DigestItem"]:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select n.id,
+                           n.account_id,
+                           ga.email,
+                           n.gmail_thread_id,
+                           n.sender_name,
+                           n.summary,
+                           n.category,
+                           n.importance
+                      from notifications n
+                      join gmail_accounts ga on ga.id = n.account_id
+                     where n.status = 'digest_queued'
+                     order by n.created_at asc
+                     limit %s
+                    """,
+                    (limit,),
+                )
+                rows = cur.fetchall()
+        return [
+            DigestItem(
+                notification_id=row[0],
+                account_id=row[1],
+                account_email=row[2],
+                gmail_thread_id=row[3] or "",
+                sender_name=row[4] or "Unknown",
+                summary=row[5] or "",
+                category=row[6] or "Other",
+                importance=row[7] or "low",
+            )
+            for row in rows
+        ]
+
+    def mark_digest_sent(self, notification_ids: List[int], digest_group_id: str) -> None:
+        if not notification_ids:
+            return
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update notifications
+                       set status = 'digested',
+                           digest_group_id = %s,
+                           digested_at = now(),
+                           updated_at = now()
+                     where id = any(%s)
+                    """,
+                    (digest_group_id, notification_ids),
+                )
+            conn.commit()
+
     def delete_notification(self, notification_id: int) -> None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("delete from notifications where id = %s", (notification_id,))
             conn.commit()
 
-    def insert_suppression(self, account_id: int, sender_key: str, category: str) -> None:
+    def insert_suppression(
+        self,
+        account_id: int,
+        scope: str,
+        rule_value: str,
+        category_key: str = "",
+    ) -> None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    insert into suppressions (account_id, sender_key, category)
-                    values (%s, %s, %s)
-                    on conflict (account_id, sender_key, category) do nothing
+                    insert into suppressions (account_id, sender_key, category, scope, rule_value, category_key)
+                    values (%s, %s, %s, %s, %s, %s)
+                    on conflict do nothing
                     """,
-                    (account_id, sender_key, category),
+                    (account_id, rule_value, category_key or "", scope, rule_value, category_key or ""),
                 )
             conn.commit()
 
-    def is_suppressed(self, account_id: int, sender_key: str, category: str) -> bool:
+    def is_suppressed(
+        self,
+        account_id: int,
+        sender_key: str,
+        sender_domain: str,
+        category: str,
+    ) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -273,13 +363,39 @@ class Database:
                     select 1
                       from suppressions
                      where account_id = %s
-                       and sender_key = %s
-                       and category = %s
+                       and (
+                            (scope = 'sender' and rule_value = %s)
+                         or (scope = 'domain' and rule_value = %s)
+                         or (scope = 'sender_category' and rule_value = %s and category_key = %s)
+                       )
                      limit 1
                     """,
-                    (account_id, sender_key, category),
+                    (account_id, sender_key, sender_domain, sender_key, category),
                 )
                 return cur.fetchone() is not None
+
+    def clear_notification_suppressions(
+        self,
+        account_id: int,
+        sender_key: str,
+        sender_domain: str,
+        category: str,
+    ) -> None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    delete from suppressions
+                     where account_id = %s
+                       and (
+                            (scope = 'sender' and rule_value = %s)
+                         or (scope = 'domain' and rule_value = %s)
+                         or (scope = 'sender_category' and rule_value = %s and category_key = %s)
+                       )
+                    """,
+                    (account_id, sender_key, sender_domain, sender_key, category),
+                )
+            conn.commit()
 
     def upsert_usage_daily(
         self,
@@ -367,6 +483,18 @@ class Database:
 
 
 @dataclass(frozen=True)
+class DigestItem:
+    notification_id: int
+    account_id: int
+    account_email: str
+    gmail_thread_id: str
+    sender_name: str
+    summary: str
+    category: str
+    importance: str
+
+
+@dataclass(frozen=True)
 class Notification:
     id: int
     account_id: int
@@ -379,6 +507,7 @@ class Notification:
     summary: Optional[str]
     category: Optional[str]
     confidence: Optional[float]
+    importance: Optional[str]
     status: str
     telegram_chat_id: Optional[int]
     telegram_message_id: Optional[int]

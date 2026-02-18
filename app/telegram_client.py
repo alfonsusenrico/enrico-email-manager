@@ -52,6 +52,7 @@ class TelegramClient:
         category: str,
         status: Optional[str] = None,
         note: Optional[str] = None,
+        importance: Optional[str] = None,
     ) -> str:
         sender_display = sender_name.strip()
         if not sender_display:
@@ -70,6 +71,8 @@ class TelegramClient:
             f"📩 From: {sender_display}",
             f"🏷️ Category: {category}",
         ]
+        if importance:
+            lines.append(f"🔥 Importance: {importance}")
         if status:
             lines.append(f"{status_icon} Status: {status}")
         if note:
@@ -113,9 +116,10 @@ class TelegramClient:
                 InlineKeyboardButton("Open", url=open_url),
                 InlineKeyboardButton("Archive", callback_data=f"a:{notification_id}"),
                 InlineKeyboardButton("Trash", callback_data=f"t:{notification_id}"),
-                InlineKeyboardButton(
-                    "Not-Interested", callback_data=f"n:{notification_id}"
-                ),
+                InlineKeyboardButton("Not-Interested", callback_data=f"n:{notification_id}"),
+            ],
+            [
+                InlineKeyboardButton("Mark Important", callback_data=f"mi:{notification_id}"),
             ],
         ]
 
@@ -129,6 +133,30 @@ class TelegramClient:
     @staticmethod
     def build_open_only_keyboard(open_url: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[InlineKeyboardButton("Open", url=open_url)]])
+
+    @staticmethod
+    def build_open_with_undo_keyboard(open_url: str, undo_data: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Open", url=open_url), InlineKeyboardButton("Undo", callback_data=undo_data)]]
+        )
+
+    @staticmethod
+    def build_not_interested_picker(notification_id: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Mute sender+category", callback_data=f"ns:{notification_id}:sc")],
+                [InlineKeyboardButton("Mute sender (all)", callback_data=f"ns:{notification_id}:ss")],
+                [InlineKeyboardButton("Mute domain (all)", callback_data=f"ns:{notification_id}:sd")],
+                [InlineKeyboardButton("Cancel", callback_data=f"ncan:{notification_id}")],
+            ]
+        )
+
+    @staticmethod
+    def build_inbox_url(account_email: Optional[str] = None) -> str:
+        if account_email:
+            safe_email = quote(account_email, safe="")
+            return f"https://mail.google.com/mail/u/0/?authuser={safe_email}#inbox"
+        return "https://mail.google.com/mail/u/0/#inbox"
 
     @staticmethod
     def _build_category_rows(

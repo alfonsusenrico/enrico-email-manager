@@ -134,9 +134,17 @@ Rules:
 - Open - open Gmail message in a browser (Telegram in-app browser on mobile).
 - Archive - remove INBOX label and update message state in Telegram.
 - Trash (confirm) - confirm first, then move to Gmail Trash and update message state.
-- Not-Interested - suppress future messages by sender_key + category and update message state.
+- Not-Interested - choose suppression scope:
+  - sender + category,
+  - sender (all categories),
+  - sender domain (all categories).
+- Mark Important - override importance to high.
+- Undo - available for Archive/Trash/Not-Interested.
 - Low-confidence picker - manual category selection updates the category/confidence and removes picker buttons.
 Message format note: sender name only (no email), no subject line, no confidence shown, and primary buttons are on a single inline row.
+
+### Digest Mode
+Low-importance emails can be queued and sent in periodic digest messages to reduce noise.
 
 ### Known Limitations
 - Telegram inline button URLs must be http/https, so the Open button cannot deep-link into the Gmail app; it opens the web view on mobile.
@@ -190,6 +198,8 @@ docker compose up --build -d
 | OPENAI_PRICE_OUTPUT_PER_1M | Yes | 2.00 | USD per 1M output tokens. |
 | LLM_MAX_INPUT_TOKENS | No | 12000 | Max tokens for email content sent to the LLM. |
 | LLM_LOW_CONFIDENCE_THRESHOLD | No | 0.8 | Low-confidence cutoff (still notify). |
+| DIGEST_ENABLED | No | true | Enable digest queue for low-importance emails. |
+| DIGEST_INTERVAL_MINUTES | No | 30 | Digest flush interval in minutes. |
 | DATABASE_URL | Yes | postgres://postgres:postgres@db:5432/email_manager?sslmode=disable | Postgres connection string. |
 
 ## Usage

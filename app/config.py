@@ -35,6 +35,8 @@ class Settings:
     app_host: str
     app_port: int
     database_url: str
+    digest_enabled: bool
+    digest_interval_minutes: int
 
     @property
     def telegram_webhook_url(self) -> str:
@@ -95,6 +97,15 @@ def _parse_float(value: str, name: str) -> float:
         raise ConfigError(f"{name} must be a number") from exc
 
 
+def _parse_bool(raw_value: str, name: str) -> bool:
+    value = (raw_value or "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off", ""):
+        return False
+    raise ConfigError(f"{name} must be boolean")
+
+
 def _parse_int_list(raw_value: str, name: str) -> List[int]:
     if not raw_value:
         return []
@@ -152,4 +163,9 @@ def load_settings() -> Settings:
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=_parse_int(os.getenv("APP_PORT", "8080"), "APP_PORT"),
         database_url=_require_env("DATABASE_URL"),
+        digest_enabled=_parse_bool(os.getenv("DIGEST_ENABLED", "true"), "DIGEST_ENABLED"),
+        digest_interval_minutes=_parse_int(
+            os.getenv("DIGEST_INTERVAL_MINUTES", "30"),
+            "DIGEST_INTERVAL_MINUTES",
+        ),
     )

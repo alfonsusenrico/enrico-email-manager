@@ -61,12 +61,20 @@ def _format_notification(
         category=resolved_category,
         status=status,
         note=note,
+        importance=notification.importance,
     )
 
 
 def _low_confidence(notification: Notification, settings: Settings) -> bool:
     confidence = notification.confidence or 0.0
     return confidence < settings.llm_low_confidence_threshold
+
+
+def _sender_domain(sender_email: Optional[str]) -> str:
+    if not sender_email:
+        return ""
+    value = sender_email.lower()
+    return value.split("@", 1)[1] if "@" in value else value
 
 
 def _is_query_match(query, notification: Notification) -> bool:
@@ -201,9 +209,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         open_url = _notification_open_url(
             telegram_client, notification, account_runtime.email
         )
-        keyboard = telegram_client.build_open_only_keyboard(open_url)
+        keyboard = telegram_client.build_open_with_undo_keyboard(open_url, f"u:{notification.id}:a")
         message_text = _format_notification(
             telegram_client, notification, status="Archived"
+        )
+        await _update_message(query, message_text, keyboard)
+        return
+
+    if action == "mi":
+        await asyncio.to_thread(db.update_notification_importance, notification.id, "high")
+        notification = await _get_notification(db, notification.id)
+        if not notification:
+            return
+        include_categories = _low_confidence(notification, settings)
+        keyboard = telegram_client.build_keyboard(
+            notification_id=notification.id,
+            open_url=_notification_open_url(
+                telegram_client, notification, account_runtime.email
+            ),
+            include_categories=include_categories,
+            categories=CATEGORY_ENUM,
+        )
+        message_text = _format_notification(
+            telegram_client, notification, status="Marked Important"
         )
         await _update_message(query, message_text, keyboard)
         return
@@ -245,7 +273,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         open_url = _notification_open_url(
             telegram_client, notification, account_runtime.email
         )
-        keyboard = telegram_client.build_open_only_keyboard(open_url)
+        keyboard = telegram_client.build_open_with_undo_keyboard(open_url, f"u:{notification.id}:t")
         message_text = _format_notification(
             telegram_client, notification, status="Trashed"
         )
@@ -253,25 +281,101 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if action == "n":
+        picker = telegram_client.build_not_interested_picker(notification.id)
+        await query.edit_message_reply_markup(reply_markup=picker)
+        return
+
+    if action == "ncan":
+        include_categories = _low_confidence(notification, settings)
+        keyboard = telegram_client.build_keyboard(
+            notification_id=notification.id,
+            open_url=_notification_open_url(
+                telegram_client, notification, account_runtime.email
+            ),
+            include_categories=include_categories,
+            categories=CATEGORY_ENUM,
+        )
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+        return
+
+    if action == "ns":
+        if len(parts) < 2:
+            return
+        scope_key = parts[1]
         sender_key = notification.sender_key or (notification.sender_email or "").lower()
-        if sender_key:
+        sender_domain = _sender_domain(notification.sender_email)
+        category_key = notification.category or "Other"
+
+        if scope_key == "ss" and sender_key:
+            await asyncio.to_thread(db.insert_suppression, notification.account_id, "sender", sender_key, "")
+        elif scope_key == "sd" and sender_domain:
+            await asyncio.to_thread(db.insert_suppression, notification.account_id, "domain", sender_domain, "")
+        elif scope_key == "sc" and sender_key:
             await asyncio.to_thread(
                 db.insert_suppression,
                 notification.account_id,
+                "sender_category",
                 sender_key,
-                notification.category or "Other",
+                category_key,
             )
-        await asyncio.to_thread(
-            db.update_notification_status, notification.id, "not_interested"
-        )
+
+        await asyncio.to_thread(db.update_notification_status, notification.id, "not_interested")
         open_url = _notification_open_url(
             telegram_client, notification, account_runtime.email
         )
-        keyboard = telegram_client.build_open_only_keyboard(open_url)
+        keyboard = telegram_client.build_open_with_undo_keyboard(open_url, f"u:{notification.id}:n")
         message_text = _format_notification(
             telegram_client, notification, status="Not-Interested"
         )
         await _update_message(query, message_text, keyboard)
+        return
+
+    if action == "u":
+        if len(parts) < 2:
+            return
+        undo_target = parts[1]
+        if undo_target == "a":
+            await asyncio.to_thread(
+                gmail_client.unarchive,
+                refresh_token,
+                notification.gmail_message_id,
+                notification.gmail_thread_id,
+            )
+        elif undo_target == "t":
+            await asyncio.to_thread(
+                gmail_client.untrash,
+                refresh_token,
+                notification.gmail_message_id,
+                notification.gmail_thread_id,
+            )
+        elif undo_target == "n":
+            sender_key = notification.sender_key or (notification.sender_email or "").lower()
+            sender_domain = _sender_domain(notification.sender_email)
+            await asyncio.to_thread(
+                db.clear_notification_suppressions,
+                notification.account_id,
+                sender_key,
+                sender_domain,
+                notification.category or "Other",
+            )
+        else:
+            return
+
+        await asyncio.to_thread(db.update_notification_status, notification.id, "notified")
+        include_categories = _low_confidence(notification, settings)
+        keyboard = telegram_client.build_keyboard(
+            notification_id=notification.id,
+            open_url=_notification_open_url(
+                telegram_client, notification, account_runtime.email
+            ),
+            include_categories=include_categories,
+            categories=CATEGORY_ENUM,
+        )
+        message_text = _format_notification(
+            telegram_client, notification, status="Restored"
+        )
+        await _update_message(query, message_text, keyboard)
+        return
 
 
 def run_webhook(

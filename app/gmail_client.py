@@ -64,6 +64,21 @@ class GmailClient:
         else:
             service.users().messages().trash(userId="me", id=message_id).execute()
 
+    def unarchive(self, refresh_token: str, message_id: str, thread_id: Optional[str]) -> None:
+        service = self.build_service(refresh_token)
+        body = {"addLabelIds": ["INBOX"]}
+        if thread_id:
+            service.users().threads().modify(userId="me", id=thread_id, body=body).execute()
+        else:
+            service.users().messages().modify(userId="me", id=message_id, body=body).execute()
+
+    def untrash(self, refresh_token: str, message_id: str, thread_id: Optional[str]) -> None:
+        service = self.build_service(refresh_token)
+        if thread_id:
+            service.users().threads().untrash(userId="me", id=thread_id).execute()
+        else:
+            service.users().messages().untrash(userId="me", id=message_id).execute()
+
     def list_history(
         self, refresh_token: str, start_history_id: int, label_id: Optional[str] = None
     ) -> Dict:

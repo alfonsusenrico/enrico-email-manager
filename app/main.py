@@ -58,6 +58,7 @@ def main() -> None:
     )
     watch_manager = WatchManager(settings, db, gmail_client, accounts)
     watch_manager.start()
+    sync_service.start_background_workers()
 
     worker = PubSubWorker(settings.pubsub_subscription, sync_service)
     worker.start()

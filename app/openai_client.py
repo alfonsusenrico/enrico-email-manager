@@ -11,6 +11,7 @@ class LLMResult:
     category: str
     confidence: float
     summary: str
+    importance: str
     usage: Any
 
 
@@ -36,6 +37,7 @@ class OpenAIClient:
             "Do not mention email metadata (subject line, sent date/time) unless the body explicitly includes it.\n"
             "Return strict JSON that matches the provided schema.\n"
             "Use one of the provided categories and set confidence between 0 and 1.\n"
+            "Set importance as high/medium/low based on urgency + user action need.\n"
             "Categories:\n"
             + "\n".join(f"- {category}" for category in categories)
         )
@@ -46,8 +48,9 @@ class OpenAIClient:
                 "category": {"type": "string", "enum": categories},
                 "confidence": {"type": "number"},
                 "summary": {"type": "string"},
+                "importance": {"type": "string", "enum": ["high", "medium", "low"]},
             },
-            "required": ["category", "confidence", "summary"],
+            "required": ["category", "confidence", "summary", "importance"],
             "additionalProperties": False,
         }
 
@@ -77,12 +80,16 @@ class OpenAIClient:
         except (TypeError, ValueError):
             confidence = 0.0
         summary = data.get("summary") or ""
+        importance = str(data.get("importance") or "medium").lower()
+        if importance not in ("high", "medium", "low"):
+            importance = "medium"
 
         usage = response.usage or {}
         return LLMResult(
             category=category,
             confidence=confidence,
             summary=summary,
+            importance=importance,
             usage=usage,
         )
 
