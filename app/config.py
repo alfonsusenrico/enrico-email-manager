@@ -23,6 +23,7 @@ class Settings:
     google_application_credentials: str
     gmail_oauth_client_secret_json: str
     gmail_accounts: List[GmailAccountConfig]
+    assistant_dispatch_enabled: bool
     assistant_bridge_url: str
     assistant_shared_secret: str
     public_base_url: str
@@ -98,7 +99,28 @@ def _parse_int(value: str, name: str) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
+def _parse_bool(value: str, name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be a boolean")
+
+
 def load_settings() -> Settings:
+    assistant_dispatch_enabled = _parse_bool(
+        os.getenv("ASSISTANT_DISPATCH_ENABLED", "true"),
+        "ASSISTANT_DISPATCH_ENABLED",
+    )
+    assistant_bridge_url = os.getenv("ASSISTANT_BRIDGE_URL", "").strip()
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+
+    if assistant_dispatch_enabled and not assistant_bridge_url:
+        raise ConfigError(
+            "ASSISTANT_BRIDGE_URL is required when ASSISTANT_DISPATCH_ENABLED=true"
+        )
+
     return Settings(
         gmail_watch_topic=_require_env("GMAIL_WATCH_TOPIC"),
         pubsub_subscription=_require_env("PUBSUB_SUBSCRIPTION"),
@@ -108,9 +130,10 @@ def load_settings() -> Settings:
         google_application_credentials=_require_env("GOOGLE_APPLICATION_CREDENTIALS"),
         gmail_oauth_client_secret_json=_require_env("GMAIL_OAUTH_CLIENT_SECRET_JSON"),
         gmail_accounts=_parse_accounts(_require_env("GMAIL_ACCOUNTS_JSON")),
-        assistant_bridge_url=_require_env("ASSISTANT_BRIDGE_URL"),
+        assistant_dispatch_enabled=assistant_dispatch_enabled,
+        assistant_bridge_url=assistant_bridge_url,
         assistant_shared_secret=os.getenv("ASSISTANT_SHARED_SECRET", "").strip(),
-        public_base_url=_require_env("PUBLIC_BASE_URL"),
+        public_base_url=public_base_url,
         assistant_dispatch_timeout_seconds=_parse_int(
             os.getenv("ASSISTANT_DISPATCH_TIMEOUT_SECONDS", "15"),
             "ASSISTANT_DISPATCH_TIMEOUT_SECONDS",

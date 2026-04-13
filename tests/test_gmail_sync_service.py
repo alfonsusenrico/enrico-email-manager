@@ -16,6 +16,7 @@ def _settings() -> Settings:
         google_application_credentials="secrets/service_account.json",
         gmail_oauth_client_secret_json="secrets/client_secret.json",
         gmail_accounts=[GmailAccountConfig(email="user@example.com", refresh_token="token")],
+        assistant_dispatch_enabled=True,
         assistant_bridge_url="https://openclaw.example/internal/email-manager/events",
         assistant_shared_secret="",
         public_base_url="https://email-manager.example",

@@ -91,14 +91,15 @@ The design rationale and migration framing are documented in [docs/assistant-fir
 |------|---------|---------|
 | `APP_HOST` | `0.0.0.0` | Bind host for the local assistant callback API |
 | `APP_PORT` | `8080` | Bind port for the local assistant callback API |
-| `PUBLIC_BASE_URL` | `https://email-manager.example` | Public base URL that OpenClaw can call back into |
+| `PUBLIC_BASE_URL` | `https://email-manager.example` | Public base URL that OpenClaw can call back into. Can stay empty while dispatch is disabled. |
 | `GMAIL_WATCH_TOPIC` | `projects/<project-id>/topics/gmail-watch-topic` | Gmail watch topic |
 | `PUBSUB_SUBSCRIPTION` | `projects/<project-id>/subscriptions/gmail-watch-sub` | Pull subscription consumed by the worker |
 | `GMAIL_WATCH_LABEL_IDS` | `INBOX` | Comma-separated Gmail label IDs to watch |
 | `GOOGLE_APPLICATION_CREDENTIALS` | `secrets/service_account.json` | Service account credentials for Pub/Sub |
 | `GMAIL_OAUTH_CLIENT_SECRET_JSON` | `secrets/client_secret.json` | Gmail OAuth client JSON |
 | `GMAIL_ACCOUNTS_JSON` | `[{"email":"user@gmail.com","refresh_token":"..."}]` | Gmail accounts and refresh tokens |
-| `ASSISTANT_BRIDGE_URL` | `https://openclaw.example/internal/email-manager/events` | OpenClaw ingest endpoint |
+| `ASSISTANT_DISPATCH_ENABLED` | `false` | When `false`, keep ingesting and queueing emails without attempting outbound assistant delivery |
+| `ASSISTANT_BRIDGE_URL` | `https://openclaw.example/internal/email-manager/events` | OpenClaw ingest endpoint. Required only when `ASSISTANT_DISPATCH_ENABLED=true` |
 | `ASSISTANT_SHARED_SECRET` | `replace_me_shared_secret` | Shared bearer token for outbound and inbound bridge auth |
 | `ASSISTANT_DISPATCH_TIMEOUT_SECONDS` | `15` | HTTP timeout for bridge delivery |
 | `ASSISTANT_DISPATCH_BATCH_SIZE` | `10` | Max queued evaluation requests leased per dispatch poll |
@@ -116,7 +117,7 @@ See [.env.example](.env.example) for a full example.
 1. Put Google credentials under `secrets/`.
 2. Fill `.env` from `.env.example`.
 3. Configure Gmail watch / Pub/Sub infrastructure.
-4. Configure OpenClaw with the contract in [docs/openclaw-integration.md](docs/openclaw-integration.md).
+4. If you already have an OpenClaw bridge endpoint, set `ASSISTANT_DISPATCH_ENABLED=true` and configure the contract in [docs/openclaw-integration.md](docs/openclaw-integration.md).
 5. Start the stack:
 
 ```bash
@@ -134,6 +135,11 @@ If `ASSISTANT_SHARED_SECRET` is set, callbacks must use:
 ```text
 Authorization: Bearer <ASSISTANT_SHARED_SECRET>
 ```
+
+## Bridge Readiness Modes
+
+- `ASSISTANT_DISPATCH_ENABLED=false`: safe bootstrap mode. Gmail watch, Pub/Sub sync, canonical email storage, and assistant request queueing stay active, but no outbound dispatch is attempted yet.
+- `ASSISTANT_DISPATCH_ENABLED=true`: full bridge mode. `email-manager` POSTs queued evaluation requests to OpenClaw and expects acknowledgement or callbacks.
 
 ## Running Migrations
 

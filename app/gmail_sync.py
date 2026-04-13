@@ -53,6 +53,10 @@ class GmailSyncService:
             self._ingest_thread.start()
             logger.info("Message ingest worker started")
 
+        if not self._settings.assistant_dispatch_enabled:
+            logger.info("Assistant dispatch worker disabled by configuration")
+            return
+
         if not self._dispatch_thread or not self._dispatch_thread.is_alive():
             self._dispatch_thread = threading.Thread(
                 target=self._dispatch_loop,
