@@ -1,9 +1,11 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
-WEBHOOK_PATH = "/telegram/webhook"
+ASSISTANT_EVALUATIONS_PATH = "/assistant/evaluations"
+ASSISTANT_REQUEUE_PATH = "/assistant/requeue"
+HEALTHCHECK_PATH = "/healthz"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 
@@ -21,27 +23,33 @@ class Settings:
     google_application_credentials: str
     gmail_oauth_client_secret_json: str
     gmail_accounts: List[GmailAccountConfig]
-    openai_api_key: str
-    openai_model: str
-    openai_price_input_per_1m: float
-    openai_price_cached_input_per_1m: float
-    openai_price_output_per_1m: float
-    llm_max_input_tokens: int
-    llm_low_confidence_threshold: float
-    telegram_bot_token: str
-    telegram_webhook_base_url: str
-    telegram_webhook_secret_token: str
-    telegram_allowed_user_ids: List[int]
+    assistant_bridge_url: str
+    assistant_shared_secret: str
+    public_base_url: str
+    assistant_dispatch_timeout_seconds: int
+    assistant_dispatch_batch_size: int
+    assistant_dispatch_poll_seconds: int
+    assistant_dispatch_max_attempts: int
+    ingest_worker_batch_size: int
+    ingest_worker_poll_seconds: int
+    ingest_worker_max_attempts: int
     app_host: str
     app_port: int
     database_url: str
-    digest_enabled: bool
-    digest_interval_minutes: int
 
     @property
-    def telegram_webhook_url(self) -> str:
-        base = self.telegram_webhook_base_url.rstrip("/")
-        return f"{base}{WEBHOOK_PATH}"
+    def assistant_result_callback_url(self) -> Optional[str]:
+        base = self.public_base_url.rstrip("/")
+        if not base:
+            return None
+        return f"{base}{ASSISTANT_EVALUATIONS_PATH}"
+
+    @property
+    def assistant_requeue_callback_url(self) -> Optional[str]:
+        base = self.public_base_url.rstrip("/")
+        if not base:
+            return None
+        return f"{base}{ASSISTANT_REQUEUE_PATH}"
 
 
 class ConfigError(ValueError):
@@ -90,37 +98,6 @@ def _parse_int(value: str, name: str) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
-def _parse_float(value: str, name: str) -> float:
-    try:
-        return float(value)
-    except ValueError as exc:
-        raise ConfigError(f"{name} must be a number") from exc
-
-
-def _parse_bool(raw_value: str, name: str) -> bool:
-    value = (raw_value or "").strip().lower()
-    if value in ("1", "true", "yes", "on"):
-        return True
-    if value in ("0", "false", "no", "off", ""):
-        return False
-    raise ConfigError(f"{name} must be boolean")
-
-
-def _parse_int_list(raw_value: str, name: str) -> List[int]:
-    if not raw_value:
-        return []
-    values: List[int] = []
-    for part in raw_value.split(","):
-        item = part.strip()
-        if not item:
-            continue
-        try:
-            values.append(int(item))
-        except ValueError as exc:
-            raise ConfigError(f"{name} must be a comma-separated list of integers") from exc
-    return values
-
-
 def load_settings() -> Settings:
     return Settings(
         gmail_watch_topic=_require_env("GMAIL_WATCH_TOPIC"),
@@ -131,41 +108,38 @@ def load_settings() -> Settings:
         google_application_credentials=_require_env("GOOGLE_APPLICATION_CREDENTIALS"),
         gmail_oauth_client_secret_json=_require_env("GMAIL_OAUTH_CLIENT_SECRET_JSON"),
         gmail_accounts=_parse_accounts(_require_env("GMAIL_ACCOUNTS_JSON")),
-        openai_api_key=_require_env("OPENAI_API_KEY"),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
-        openai_price_input_per_1m=_parse_float(
-            _require_env("OPENAI_PRICE_INPUT_PER_1M"),
-            "OPENAI_PRICE_INPUT_PER_1M",
+        assistant_bridge_url=_require_env("ASSISTANT_BRIDGE_URL"),
+        assistant_shared_secret=os.getenv("ASSISTANT_SHARED_SECRET", "").strip(),
+        public_base_url=_require_env("PUBLIC_BASE_URL"),
+        assistant_dispatch_timeout_seconds=_parse_int(
+            os.getenv("ASSISTANT_DISPATCH_TIMEOUT_SECONDS", "15"),
+            "ASSISTANT_DISPATCH_TIMEOUT_SECONDS",
         ),
-        openai_price_cached_input_per_1m=_parse_float(
-            _require_env("OPENAI_PRICE_CACHED_INPUT_PER_1M"),
-            "OPENAI_PRICE_CACHED_INPUT_PER_1M",
+        assistant_dispatch_batch_size=_parse_int(
+            os.getenv("ASSISTANT_DISPATCH_BATCH_SIZE", "10"),
+            "ASSISTANT_DISPATCH_BATCH_SIZE",
         ),
-        openai_price_output_per_1m=_parse_float(
-            _require_env("OPENAI_PRICE_OUTPUT_PER_1M"),
-            "OPENAI_PRICE_OUTPUT_PER_1M",
+        assistant_dispatch_poll_seconds=_parse_int(
+            os.getenv("ASSISTANT_DISPATCH_POLL_SECONDS", "3"),
+            "ASSISTANT_DISPATCH_POLL_SECONDS",
         ),
-        llm_max_input_tokens=_parse_int(
-            os.getenv("LLM_MAX_INPUT_TOKENS", "12000"),
-            "LLM_MAX_INPUT_TOKENS",
+        assistant_dispatch_max_attempts=_parse_int(
+            os.getenv("ASSISTANT_DISPATCH_MAX_ATTEMPTS", "20"),
+            "ASSISTANT_DISPATCH_MAX_ATTEMPTS",
         ),
-        llm_low_confidence_threshold=_parse_float(
-            os.getenv("LLM_LOW_CONFIDENCE_THRESHOLD", "0.8"),
-            "LLM_LOW_CONFIDENCE_THRESHOLD",
+        ingest_worker_batch_size=_parse_int(
+            os.getenv("INGEST_WORKER_BATCH_SIZE", "25"),
+            "INGEST_WORKER_BATCH_SIZE",
         ),
-        telegram_bot_token=_require_env("TELEGRAM_BOT_TOKEN"),
-        telegram_webhook_base_url=_require_env("TELEGRAM_WEBHOOK_BASE_URL"),
-        telegram_webhook_secret_token=os.getenv("TELEGRAM_WEBHOOK_SECRET_TOKEN", "").strip(),
-        telegram_allowed_user_ids=_parse_int_list(
-            os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""),
-            "TELEGRAM_ALLOWED_USER_IDS",
+        ingest_worker_poll_seconds=_parse_int(
+            os.getenv("INGEST_WORKER_POLL_SECONDS", "2"),
+            "INGEST_WORKER_POLL_SECONDS",
+        ),
+        ingest_worker_max_attempts=_parse_int(
+            os.getenv("INGEST_WORKER_MAX_ATTEMPTS", "20"),
+            "INGEST_WORKER_MAX_ATTEMPTS",
         ),
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=_parse_int(os.getenv("APP_PORT", "8080"), "APP_PORT"),
         database_url=_require_env("DATABASE_URL"),
-        digest_enabled=_parse_bool(os.getenv("DIGEST_ENABLED", "true"), "DIGEST_ENABLED"),
-        digest_interval_minutes=_parse_int(
-            os.getenv("DIGEST_INTERVAL_MINUTES", "30"),
-            "DIGEST_INTERVAL_MINUTES",
-        ),
     )

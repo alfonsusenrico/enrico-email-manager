@@ -1,237 +1,160 @@
 # Email Manager
 
-![Status](https://img.shields.io/badge/status-production-brightgreen)
+Assistant-first Gmail ingestion backend for OpenClaw.
 
-## Summary
-Gmail inboxes receive high volume and frequent checks waste time. This project summarizes new emails with an LLM and delivers them to a Telegram DM with inline action buttons to enable near-real-time triage and reduce notification noise.
+This project is no longer a Telegram triage bot. It now exists to:
 
-## Success Criteria
-- Deliver Telegram notifications for relevant emails within seconds (typical <30s).
-- Each notification contains sender name, assistant-style AI summary, category, and inline action buttons (Open, Archive, Trash, Not-Interested).
-- Enable user-trained suppression (mute by sender_key + category) with idempotent actions and no duplicate active notifications.
+- maintain Gmail `watch()` registrations
+- consume Gmail Pub/Sub events
+- durably queue and fetch new Gmail messages
+- normalize canonical email records into Postgres
+- dispatch evaluation requests to OpenClaw in near-realtime
+- accept evaluation results and re-evaluation requests back from OpenClaw
 
-## Outcome and Demo
-**Outcome:** Production-ready email triage in Telegram with AI summaries, confidence-aware classification, inline mailbox actions, and user-trained suppression to reduce notification flood over time.
+The product brain now lives in OpenClaw. `email-manager` is the durable watcher, ingestion, and bridge layer.
 
-**Demo:** Production deployment (self-hosted).
+## Current Flow
 
-## Tech Stack
-- Frontend: Telegram DM frontend (webhook) with inline buttons and message edits.
-- Backend: Python service running Pub/Sub pull consumer, Gmail sync, OpenAI Responses API calls, and Telegram handlers (python-telegram-bot webhooks).
-- Data: Postgres for durable state, dedupe and preferences; no Redis in the initial scope.
-- Infra: Docker Compose stack; Telegram webhook exposed via Cloudflared; Pub/Sub pull subscription.
+1. Gmail publishes mailbox changes to Pub/Sub.
+2. `email-manager` records the inbound watch event in `gmail_watch_events`.
+3. A history sync discovers Gmail message IDs and enqueues durable ingest jobs in `gmail_message_ingest_jobs`.
+4. Background ingest workers fetch Gmail message content and upsert canonical rows in `email_messages`.
+5. Each newly ingested email creates an `assistant_evaluation_requests` outbox row.
+6. The assistant bridge worker POSTs the normalized payload to OpenClaw.
+7. OpenClaw either:
+   - acknowledges the event and later POSTs the evaluation result back, or
+   - returns an inline evaluation result immediately.
+8. `email-manager` stores durable outcomes in `assistant_evaluation_results`.
 
-## Architecture
-A Gmail watch publishes mailbox change notices to Cloud Pub/Sub. A pull-based worker consumes events, reads historyId, calls users.history.list to discover new message IDs, and fetches message headers/snippets/bodies for LLM summarization and classification. The AI returns category, confidence, and a short summary; suppression is computed using user preferences (sender_key + category). Non-suppressed messages are pushed to the configured Telegram DM with inline buttons (Open, Archive, Trash with confirm, Not-Interested). User actions are applied to Gmail and the Telegram message is edited to reflect final state. Low-confidence results trigger a category-picker flow and are always pushed to allow manual correction.
+This separation is the key hardening change:
 
-## Service Scaffold
-- `app/main.py` bootstraps settings, DB, Pub/Sub worker, and the Telegram webhook server.
-- `app/telegram_bot.py` registers `/start` and callback handlers; chat ID is stored in `app_state`.
-- `app/pubsub_worker.py` subscribes to Pub/Sub and routes Gmail push payloads to the sync service.
-- `app/gmail_client.py` and `app/openai_client.py` provide the client scaffolding for Gmail + Responses API.
-- `app/gmail_sync.py` handles history sync, message fetch, summarization, and notification send.
-- `app/telegram_client.py` sends Telegram messages with inline buttons.
-- `app/watch_manager.py` renews Gmail watch registrations.
-- `scripts/container_start.py` waits for Postgres, applies migrations, and starts the app in Docker.
+- Pub/Sub sync no longer performs message fetch, AI judgment, and user delivery inline.
+- One broken Gmail message no longer poison-loops the entire watch event.
+- Canonical email state survives assistant outages.
 
-## Data Model (SQL)
-- `app_state` - key/value store for shared app state (ex: Telegram chat ID).
-- `gmail_accounts` - email, watch_label_ids, last_history_id, watch_expiration, timestamps.
-- `notifications` - account_id, gmail_message_id, thread_id, sender/subject, summary, category, confidence, telegram_chat_id, telegram_message_id, status, timestamps.
-- `suppressions` - account_id, sender_key, category, timestamps.
-- `usage_daily` - account_id, model, date, input/cached/output token counts, cost totals.
-Defined in `migrations/0001_init.sql`.
+## Key Runtime Components
 
-## Workflow
-- Bootstrap: load `GMAIL_ACCOUNTS_JSON`, ensure each account exists in the DB, and schedule watch renewal.
-- Pub/Sub pull: parse historyId + emailAddress, fetch deltas via users.history.list (label filter only when a single label is configured), and dedupe by (account_id, gmail_message_id).
-- Fetch + summarize: pull sender, snippet, and body text; compute sender_key; call OpenAI Responses API for summary/category/confidence.
-- Suppress + notify: apply suppression rules; send Telegram message with inline actions and store notification record + usage metrics.
-- Actions: archive (remove INBOX), trash with confirm, and not-interested suppression; update Telegram message status and reduce buttons to Open-only.
-LLM input is capped by token count (default 12k tokens).
+- [app/watch_manager.py](app/watch_manager.py): Renews Gmail `watch()` registrations and records watch errors per account.
+- [app/pubsub_worker.py](app/pubsub_worker.py): Consumes Pub/Sub events and hands them to the sync service with explicit `ack` / `nack` behavior.
+- [app/gmail_sync.py](app/gmail_sync.py): Runs history sync, durable ingest queue processing, and assistant dispatch.
+- [app/gmail_client.py](app/gmail_client.py): Gmail API client plus message normalization and Gmail error classification.
+- [app/assistant_bridge.py](app/assistant_bridge.py): Outbound HTTP bridge from `assistant_evaluation_requests` to OpenClaw.
+- [app/assistant_api.py](app/assistant_api.py): Inbound HTTP API for OpenClaw result callbacks and requeue requests.
+- [app/db.py](app/db.py): Postgres persistence for watch events, sync runs, ingest jobs, canonical emails, and assistant ledgers.
+
+## Data Model
+
+The assistant-first schema is introduced in [migrations/0003_assistant_first_ingestion.sql](migrations/0003_assistant_first_ingestion.sql).
+
+Core tables:
+
+- `gmail_watch_events`: immutable ledger of inbound Pub/Sub notices
+- `gmail_sync_runs`: durable sync attempts per account/watch event
+- `gmail_message_ingest_jobs`: retryable queue for fetching Gmail messages outside the Pub/Sub hot path
+- `gmail_message_failures`: failure ledger for per-message ingest issues
+- `email_messages`: canonical normalized Gmail messages
+- `assistant_evaluation_requests`: assistant delivery outbox with idempotency and retry state
+- `assistant_evaluation_results`: durable assistant decisions
+
+Legacy tables from the Telegram era are left in place for migration safety, but they are no longer part of the active runtime path.
+
+## Hardening Changes
+
+The current runtime now hardens the system in a few important ways:
+
+- Per-message failures are isolated behind `gmail_message_ingest_jobs`.
+- Gmail `messages.get()` `404` becomes a durable skipped message, not a Pub/Sub poison loop.
+- Retryable Gmail fetch failures are retried from Postgres instead of re-running the whole watch event.
+- Invalid Gmail history cursors are recorded as `history_recovered_with_gap` instead of silently failing.
+- Assistant delivery is durable and replayable because it is driven by `assistant_evaluation_requests`, not inline during ingestion.
+- Stale `processing` / `dispatching` rows can be re-leased after worker interruption.
+
+## OpenClaw Integration
+
+OpenClaw should integrate with this project through the assistant bridge contract, not by listening directly to Pub/Sub.
+
+Read [docs/openclaw-integration.md](docs/openclaw-integration.md) for:
+
+- outbound event payloads
+- idempotency behavior
+- callback URLs
+- evaluation result format
+- requeue contract for context changes
+
+The design rationale and migration framing are documented in [docs/assistant-first-v2.md](docs/assistant-first-v2.md).
 
 ## Configuration
 
-### GCP Setup
-1) Select or create a GCP project.
-2) Enable APIs: Gmail API, Pub/Sub API.
-3) OAuth consent screen:
-   - User type: External (or Internal if Workspace).
-   - Add scope: `https://www.googleapis.com/auth/gmail.modify`.
-   - Add your Gmail address as a test user.
-4) OAuth client (Web application):
-   - Authorized redirect URIs:
-     - `http://localhost:8080/` (used by the refresh token helper).
-5) Pub/Sub topic:
-   - `projects/<project-id>/topics/gmail-watch-topic`
-6) Grant Gmail permission to publish:
-   - Principal: `gmail-api-push@system.gserviceaccount.com`
-   - Role: `Pub/Sub Publisher`
-7) Pub/Sub subscription (pull):
-   - `projects/<project-id>/subscriptions/gmail-watch-sub`
-8) Service account for the app:
-   - Role: `Pub/Sub Subscriber`
-   - Download JSON key for local use.
+### Required Environment Variables
 
-### Secrets Layout
-Store credentials in `secrets/` (git-ignored).
-- `secrets/client_secret.json` (OAuth client)
-- `secrets/service_account.json` (service account key)
+| Name | Example | Purpose |
+|------|---------|---------|
+| `APP_HOST` | `0.0.0.0` | Bind host for the local assistant callback API |
+| `APP_PORT` | `8080` | Bind port for the local assistant callback API |
+| `PUBLIC_BASE_URL` | `https://email-manager.example` | Public base URL that OpenClaw can call back into |
+| `GMAIL_WATCH_TOPIC` | `projects/<project-id>/topics/gmail-watch-topic` | Gmail watch topic |
+| `PUBSUB_SUBSCRIPTION` | `projects/<project-id>/subscriptions/gmail-watch-sub` | Pull subscription consumed by the worker |
+| `GMAIL_WATCH_LABEL_IDS` | `INBOX` | Comma-separated Gmail label IDs to watch |
+| `GOOGLE_APPLICATION_CREDENTIALS` | `secrets/service_account.json` | Service account credentials for Pub/Sub |
+| `GMAIL_OAUTH_CLIENT_SECRET_JSON` | `secrets/client_secret.json` | Gmail OAuth client JSON |
+| `GMAIL_ACCOUNTS_JSON` | `[{"email":"user@gmail.com","refresh_token":"..."}]` | Gmail accounts and refresh tokens |
+| `ASSISTANT_BRIDGE_URL` | `https://openclaw.example/internal/email-manager/events` | OpenClaw ingest endpoint |
+| `ASSISTANT_SHARED_SECRET` | `replace_me_shared_secret` | Shared bearer token for outbound and inbound bridge auth |
+| `ASSISTANT_DISPATCH_TIMEOUT_SECONDS` | `15` | HTTP timeout for bridge delivery |
+| `ASSISTANT_DISPATCH_BATCH_SIZE` | `10` | Max queued evaluation requests leased per dispatch poll |
+| `ASSISTANT_DISPATCH_POLL_SECONDS` | `3` | Sleep interval when no evaluation requests are pending |
+| `ASSISTANT_DISPATCH_MAX_ATTEMPTS` | `20` | Max delivery attempts before marking a request failed |
+| `INGEST_WORKER_BATCH_SIZE` | `25` | Max Gmail ingest jobs leased per poll |
+| `INGEST_WORKER_POLL_SECONDS` | `2` | Sleep interval when no ingest jobs are pending |
+| `INGEST_WORKER_MAX_ATTEMPTS` | `20` | Max Gmail fetch/persist attempts before marking a job failed |
+| `DATABASE_URL` | `postgres://postgres:postgres@db:5432/email_manager?sslmode=disable` | Postgres connection string |
 
-### OAuth Refresh Token Helper
-Install the helper dependencies and run the script:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install google-auth-oauthlib google-auth-httplib2
-python3 scripts/get_gmail_refresh_token.py \
-  --client-secrets secrets/client_secret.json
-```
-
-The script prints a refresh token. Copy it into `.env` and add it to `GMAIL_ACCOUNTS_JSON`.
-
-### Telegram Setup
-Set `TELEGRAM_WEBHOOK_BASE_URL` to your Cloudflared base URL (no path). The service appends `/telegram/webhook` when registering the webhook and listens on `APP_HOST`/`APP_PORT` (defaults `0.0.0.0:8080`). The first inbound message from your account (send `/start`) is used to register the chat ID.
-Optional hardening: set `TELEGRAM_WEBHOOK_SECRET_TOKEN` (Telegram secret header) and `TELEGRAM_ALLOWED_USER_IDS` (comma-separated Telegram user IDs allowed to use `/start` and callbacks).
-
-### Gmail Accounts
-The app supports multiple Gmail accounts and posts them to the same Telegram chat. Run the refresh token helper once per account and add them to `.env` using `GMAIL_ACCOUNTS_JSON`:
-```bash
-GMAIL_ACCOUNTS_JSON='[{"email":"user1@gmail.com","refresh_token":"replace_me"},{"email":"user2@gmail.com","refresh_token":"replace_me"}]'
-```
-
-### Category Enum
-- Security - login alerts, suspicious activity, password reset, 2FA
-- Finance - bank transactions, invoices, receipts, payment confirmations
-- Account - account changes, subscription status, plan upgrades/downgrades
-- Work/Action Required - needs your reply/approval, deadlines, tasks, invitations (non-calendar)
-- Transactional - order confirmations, shipping, tickets, booking confirmations (non-finance)
-- Updates - product updates, release notes, service announcements (not urgent)
-- Support - support tickets, customer service replies, case updates
-- Marketing - promotions, new product offers, cross-sell
-- Newsletter - recurring content digests, blogs, weekly summaries
-- Other - fallback bucket
-
-### AI Output Schema
-Strict JSON output:
-```json
-{
-  "category": "Security",
-  "confidence": 0.92,
-  "summary": "Concise assistant summary in 1-2 sentences."
-}
-```
-
-Rules:
-- `category` must match one of the Category Enum values above.
-- `confidence` is 0.0 to 1.0.
-- `summary` should be 1-2 short sentences in a minimal assistant tone; keep only core information or required action, strip boilerplate (unsubscribe, marketing footers, legal text), and avoid email metadata unless it appears in the body.
-- For statements/bills, include statement type, amount due, minimum payment, and due date when present; add balances/points only if material.
-- For alerts, state what happened and what you should do (if anything).
-- Low-confidence classifications trigger a manual category picker and are always delivered.
-
-### Telegram Actions
-- Open - open Gmail message in a browser (Telegram in-app browser on mobile).
-- Archive - remove INBOX label and update message state in Telegram.
-- Trash (confirm) - confirm first, then move to Gmail Trash and update message state.
-- Not-Interested - choose suppression scope:
-  - sender + category,
-  - sender (all categories),
-  - sender domain (all categories).
-- Mark Important - override importance to high.
-- Undo - available for Archive/Trash/Not-Interested.
-- Low-confidence picker - manual category selection updates the category/confidence and removes picker buttons.
-Message format note: sender name only (no email), no subject line, no confidence shown, and primary buttons are on a single inline row.
-
-### Digest Mode
-Low-importance emails can be queued and sent in periodic digest messages to reduce noise.
-
-### Known Limitations
-- Telegram inline button URLs must be http/https, so the Open button cannot deep-link into the Gmail app; it opens the web view on mobile.
+See [.env.example](.env.example) for a full example.
 
 ## Setup
-1) Clone
-```bash
-git clone https://github.com/alfonsusenrico/enrico-email-manager
-cd enrico-email-manager
-```
 
-2) Place secrets
-```bash
-mkdir -p secrets
-mv client_secret.json secrets/
-mv service_account.json secrets/
-```
+1. Put Google credentials under `secrets/`.
+2. Fill `.env` from `.env.example`.
+3. Configure Gmail watch / Pub/Sub infrastructure.
+4. Configure OpenClaw with the contract in [docs/openclaw-integration.md](docs/openclaw-integration.md).
+5. Start the stack:
 
-3) Generate Gmail refresh token
-- Run the helper in the Configuration section above for each account and update `GMAIL_ACCOUNTS_JSON`.
-
-4) Configure
-```bash
-cp .env.example .env && edit .env
-```
-
-5) Run (Docker Compose)
 ```bash
 docker compose up --build -d
 ```
 
-## Environment Variables
-| Name | Required | Example | Notes |
-|------|----------|---------|-------|
-| APP_HOST | No | 0.0.0.0 | Webhook server bind host. |
-| APP_PORT | No | 8080 | Webhook server port. |
-| GOOGLE_APPLICATION_CREDENTIALS | Yes | secrets/service_account.json | Service account key for Pub/Sub pull. |
-| GMAIL_OAUTH_CLIENT_SECRET_JSON | Yes | secrets/client_secret.json | OAuth client JSON. |
-| GMAIL_ACCOUNTS_JSON | Yes | `[{"email":"user@gmail.com","refresh_token":"..."}]` | JSON array of Gmail accounts and refresh tokens. |
-| GMAIL_WATCH_TOPIC | Yes | projects/<project-id>/topics/gmail-watch-topic | Topic used by users.watch. |
-| PUBSUB_SUBSCRIPTION | Yes | projects/<project-id>/subscriptions/gmail-watch-sub | Pull subscription to consume. |
-| GMAIL_WATCH_LABEL_IDS | No | INBOX | Comma-separated label IDs to watch (INBOX default). |
-| TELEGRAM_BOT_TOKEN | Yes | TBD | Bot token. |
-| TELEGRAM_WEBHOOK_BASE_URL | Yes | https://<cloudflared> | Cloudflared base URL; `/telegram/webhook` is appended by the service. |
-| TELEGRAM_WEBHOOK_SECRET_TOKEN | No | random-string | Enables Telegram webhook secret token validation. |
-| TELEGRAM_ALLOWED_USER_IDS | No | 123456789 | Comma-separated Telegram user IDs allowed to register/use the bot. |
-| OPENAI_API_KEY | Yes | TBD | OpenAI API key. |
-| OPENAI_MODEL | No | gpt-5-mini | Responses API model name. |
-| OPENAI_PRICE_INPUT_PER_1M | Yes | 0.25 | USD per 1M input tokens. |
-| OPENAI_PRICE_CACHED_INPUT_PER_1M | Yes | 0.025 | USD per 1M cached input tokens. |
-| OPENAI_PRICE_OUTPUT_PER_1M | Yes | 2.00 | USD per 1M output tokens. |
-| LLM_MAX_INPUT_TOKENS | No | 12000 | Max tokens for email content sent to the LLM. |
-| LLM_LOW_CONFIDENCE_THRESHOLD | No | 0.8 | Low-confidence cutoff (still notify). |
-| DIGEST_ENABLED | No | true | Enable digest queue for low-importance emails. |
-| DIGEST_INTERVAL_MINUTES | No | 30 | Digest flush interval in minutes. |
-| DATABASE_URL | Yes | postgres://postgres:postgres@db:5432/email_manager?sslmode=disable | Postgres connection string. |
+## Local Endpoints
 
-## Usage
-```bash
-# Start services
-docker compose up --build -d
+- `GET /healthz`: local health endpoint
+- `POST /assistant/evaluations`: OpenClaw posts completed evaluation results here
+- `POST /assistant/requeue`: OpenClaw requests contextual re-evaluation here
 
-# View logs (example)
-docker compose logs -f app
+If `ASSISTANT_SHARED_SECRET` is set, callbacks must use:
+
+```text
+Authorization: Bearer <ASSISTANT_SHARED_SECRET>
 ```
 
-## Database Migrations
-- SQL files live in `migrations/` and are applied in filename order.
-- Migrations run automatically on container start.
-- Manual apply (optional):
+## Running Migrations
+
+Migrations run automatically on container start.
+
+Manual apply:
+
 ```bash
 docker compose run --rm app python3 scripts/apply_migrations.py
 ```
 
-## Deployment
-Deploy as a self-hosted Docker Compose stack. Expose the Telegram webhook endpoint via Cloudflared. Ensure Gmail API credentials and Pub/Sub topic/subscription permissions are provisioned and that the Gmail watch() renewal job runs periodically. Use a Pub/Sub pull subscription to avoid inbound public endpoints for Pub/Sub messages.
+## Verification
 
-## Metrics
-Track per-email token usage from the OpenAI Responses API and estimate cost using the pricing variables above. Store or log totals for observability.
+Lightweight regression tests:
 
-## Data Retention
-Store minimal metadata only (sender, subject, summary, category/confidence, Gmail + Telegram IDs); no email body is stored. Retain records indefinitely.
+```bash
+python3 -m unittest discover -s tests
+```
 
-## Operations
-- Monitor logs and Pub/Sub delivery.
-- Rotate Gmail tokens, Telegram bot token, and OpenAI API key as needed.
-- Back up Postgres volume for long-term retention.
+Syntax check:
 
-## License
-MIT License - permissive; see https://opensource.org/license/mit/
+```bash
+python3 -m compileall app tests
+```

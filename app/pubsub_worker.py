@@ -61,10 +61,18 @@ class PubSubWorker:
                 logger.warning("Invalid Pub/Sub payload: %s", payload)
                 message.ack()
                 return
-            self._sync_service.handle_pubsub_event(email_address, int(history_id))
+            should_ack = self._sync_service.handle_pubsub_event(
+                email_address,
+                int(history_id),
+                getattr(message, "message_id", None),
+            )
         except Exception:
-            logger.exception("Failed to parse Pub/Sub message")
+            logger.exception("Pub/Sub message handling failed")
             message.nack()
             return
 
-        message.ack()
+        if should_ack:
+            message.ack()
+            return
+
+        message.nack()

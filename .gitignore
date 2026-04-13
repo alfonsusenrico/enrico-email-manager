@@ -5,6 +5,7 @@ Thumbs.db
 # Editor folders
 .vscode/
 .idea/
+.codex
 
 # Environment files
 .env

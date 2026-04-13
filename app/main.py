@@ -1,14 +1,13 @@
 import logging
 import os
 
+from app.assistant_api import AssistantApiServer
+from app.assistant_bridge import AssistantBridgeClient
 from app.config import ConfigError, GMAIL_SCOPES, load_settings
+from app.db import Database
 from app.gmail_client import GmailClient
 from app.gmail_sync import AccountRuntime, GmailSyncService
-from app.openai_client import OpenAIClient
-from app.db import Database
 from app.pubsub_worker import PubSubWorker
-from app.telegram_bot import run_webhook
-from app.telegram_client import TelegramClient
 from app.watch_manager import WatchManager
 
 
@@ -36,24 +35,18 @@ def main() -> None:
         )
         for account in settings.gmail_accounts
     }
-    accounts_by_id = {runtime.account_id: runtime for runtime in accounts.values()}
 
     gmail_client = GmailClient(
         client_secret_path=settings.gmail_oauth_client_secret_json,
         scopes=GMAIL_SCOPES,
     )
-    openai_client = OpenAIClient(
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
-    )
-    telegram_client = TelegramClient(settings.telegram_bot_token)
+    assistant_bridge = AssistantBridgeClient(settings)
 
     sync_service = GmailSyncService(
         settings=settings,
         db=db,
         gmail_client=gmail_client,
-        openai_client=openai_client,
-        telegram_client=telegram_client,
+        assistant_bridge=assistant_bridge,
         accounts=accounts,
     )
     watch_manager = WatchManager(settings, db, gmail_client, accounts)
@@ -63,7 +56,18 @@ def main() -> None:
     worker = PubSubWorker(settings.pubsub_subscription, sync_service)
     worker.start()
 
-    run_webhook(settings, db, gmail_client, telegram_client, accounts_by_id)
+    server = AssistantApiServer((settings.app_host, settings.app_port), db, settings)
+    logging.info(
+        "Assistant API listening on %s:%s",
+        settings.app_host,
+        settings.app_port,
+    )
+    try:
+        server.serve_forever()
+    finally:
+        sync_service.stop()
+        worker.stop()
+        server.server_close()
 
 
 if __name__ == "__main__":

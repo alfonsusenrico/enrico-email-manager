@@ -1,13 +1,15 @@
 import base64
+import datetime as dt
 import json
 from dataclasses import dataclass
+from email.utils import getaddresses, parseaddr
 from typing import Dict, List, Optional
 
+from bs4 import BeautifulSoup
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from bs4 import BeautifulSoup
 
 
 @dataclass(frozen=True)
@@ -16,9 +18,16 @@ class GmailMessage:
     thread_id: str
     sender_email: str
     sender_name: str
+    sender_domain: str
+    to_recipients: List[Dict[str, str]]
+    cc_recipients: List[Dict[str, str]]
     subject: str
     snippet: str
     body_text: str
+    label_ids: List[str]
+    headers: Dict[str, str]
+    message_internal_at: Optional[dt.datetime]
+    raw_size_bytes: Optional[int]
 
 
 class GmailClient:
@@ -34,7 +43,7 @@ class GmailClient:
             client_id=self._client_info["client_id"],
             client_secret=self._client_info["client_secret"],
             scopes=self._scopes,
-        )        
+        )
         return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
     def watch_inbox(self, refresh_token: str, topic_name: str, label_ids: List[str]) -> Dict:
@@ -115,29 +124,69 @@ class GmailClient:
         )
 
         payload = message.get("payload", {})
-        headers = {h["name"].lower(): h.get("value", "") for h in payload.get("headers", [])}
-        sender = headers.get("from", "")
-        sender_name, sender_email = self._parse_sender(sender)
-        subject = headers.get("subject", "")
-        snippet = message.get("snippet", "")
+        headers = {
+            header["name"].lower(): header.get("value", "")
+            for header in payload.get("headers", [])
+            if header.get("name")
+        }
+        sender_name, sender_email = self._parse_sender(headers.get("from", ""))
+        sender_domain = self._extract_domain(sender_email)
         body_text = self._extract_body_text(payload)
+        internal_date = self._parse_internal_date(message.get("internalDate"))
 
         return GmailMessage(
             message_id=message.get("id", message_id),
             thread_id=message.get("threadId", ""),
             sender_email=sender_email,
             sender_name=sender_name,
-            subject=subject,
-            snippet=snippet,
+            sender_domain=sender_domain,
+            to_recipients=self._parse_address_list(headers.get("to", "")),
+            cc_recipients=self._parse_address_list(headers.get("cc", "")),
+            subject=headers.get("subject", ""),
+            snippet=message.get("snippet", ""),
             body_text=body_text,
+            label_ids=list(message.get("labelIds", []) or []),
+            headers=headers,
+            message_internal_at=internal_date,
+            raw_size_bytes=message.get("sizeEstimate"),
         )
 
     @staticmethod
     def _parse_sender(sender: str) -> tuple[str, str]:
-        if "<" in sender and ">" in sender:
-            name_part, email_part = sender.split("<", 1)
-            return name_part.strip().strip('"'), email_part.strip(" >")
-        return "", sender.strip()
+        name, email_address = parseaddr(sender)
+        return name.strip(), email_address.strip().lower()
+
+    @staticmethod
+    def _parse_address_list(raw_value: str) -> List[Dict[str, str]]:
+        recipients: List[Dict[str, str]] = []
+        for name, email_address in getaddresses([raw_value]):
+            email_address = email_address.strip().lower()
+            if not email_address:
+                continue
+            recipients.append(
+                {
+                    "name": name.strip(),
+                    "email": email_address,
+                }
+            )
+        return recipients
+
+    @staticmethod
+    def _extract_domain(email_address: str) -> str:
+        if "@" not in email_address:
+            return email_address
+        return email_address.split("@", 1)[1]
+
+    @staticmethod
+    def _parse_internal_date(raw_value: Optional[str]) -> Optional[dt.datetime]:
+        if not raw_value:
+            return None
+        try:
+            return dt.datetime.fromtimestamp(
+                int(raw_value) / 1000, tz=dt.timezone.utc
+            )
+        except (TypeError, ValueError, OSError):
+            return None
 
     def _extract_body_text(self, payload: Dict) -> str:
         plain = self._find_part(payload, "text/plain")
@@ -174,17 +223,17 @@ class GmailClient:
 
     @staticmethod
     def is_history_invalid(error: Exception) -> bool:
-        if isinstance(error, HttpError):
-            return error.resp.status == 404
-        return False
+        return isinstance(error, HttpError) and error.resp.status == 404
+
+    @staticmethod
+    def is_message_not_found(error: Exception) -> bool:
+        return isinstance(error, HttpError) and error.resp.status == 404
 
     @staticmethod
     def is_auth_error(error: Exception) -> bool:
         if isinstance(error, RefreshError):
             retryable = getattr(error, "retryable", False)
-            if retryable:
-                return False
-            return True
+            return not retryable
 
         if isinstance(error, HttpError):
             if error.resp.status in (401, 403):
@@ -210,6 +259,36 @@ class GmailClient:
                             reason = entry.get("reason")
                             if reason in ("authError", "invalidCredentials", "forbidden"):
                                 return True
+        return False
+
+    @staticmethod
+    def is_retryable_error(error: Exception) -> bool:
+        if isinstance(error, RefreshError):
+            return bool(getattr(error, "retryable", False))
+
+        if not isinstance(error, HttpError):
+            return False
+
+        if error.resp.status in (408, 429, 500, 502, 503, 504):
+            return True
+
+        content = getattr(error, "content", None)
+        if not content:
+            return False
+        if isinstance(content, (bytes, bytearray)):
+            content = content.decode("utf-8", errors="replace")
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            return False
+        error_info = data.get("error")
+        if not isinstance(error_info, dict):
+            return False
+        errors = error_info.get("errors") or []
+        for entry in errors:
+            reason = entry.get("reason")
+            if reason in ("backendError", "internalError", "rateLimitExceeded", "userRateLimitExceeded"):
+                return True
         return False
 
     @staticmethod

@@ -41,8 +41,9 @@ class WatchManager:
             for account in self._accounts.values():
                 try:
                     self._ensure_watch(account)
-                except Exception:
+                except Exception as exc:
                     logger.exception("Watch renewal failed for %s", account.email)
+                    self._db.update_account_watch_error(account.account_id, str(exc))
             time.sleep(LOOP_INTERVAL_SECONDS)
 
     def _ensure_watch(self, account: AccountRuntime) -> None:
@@ -83,6 +84,7 @@ class WatchManager:
                     delay,
                     until_text,
                 )
+                self._db.update_account_watch_error(account.account_id, str(exc))
                 return
             raise
         self._auth_backoff.reset(account.account_id)
