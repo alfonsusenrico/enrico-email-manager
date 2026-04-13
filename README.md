@@ -81,6 +81,12 @@ Read [docs/openclaw-integration.md](docs/openclaw-integration.md) for:
 - evaluation result format
 - requeue contract for context changes
 
+Read [docs/openclaw-implementation-brief.md](docs/openclaw-implementation-brief.md) for:
+
+- the concrete OpenClaw-side build brief
+- the adapter requirements
+- acceptance criteria before enabling live dispatch
+
 The design rationale and migration framing are documented in [docs/assistant-first-v2.md](docs/assistant-first-v2.md).
 
 ## Configuration
