@@ -1,3 +1,4 @@
+import datetime as dt
 import unittest
 
 from tests.stubs import install_dependency_stubs
@@ -5,7 +6,9 @@ from tests.stubs import install_dependency_stubs
 install_dependency_stubs()
 
 from app.config import GmailAccountConfig, Settings
+from app.gmail_client import GmailMessage
 from app.gmail_sync import AccountRuntime, GmailSyncService
+from app.db import GmailIngestJob
 
 
 def _settings() -> Settings:
@@ -24,6 +27,7 @@ def _settings() -> Settings:
         assistant_dispatch_batch_size=10,
         assistant_dispatch_poll_seconds=3,
         assistant_dispatch_max_attempts=20,
+        assistant_max_email_age_seconds=86400,
         ingest_worker_batch_size=25,
         ingest_worker_poll_seconds=2,
         ingest_worker_max_attempts=20,
@@ -66,19 +70,48 @@ class FakeDatabase:
         self.last_history_id = history_id
 
 
+class FakeIngestDatabase(FakeDatabase):
+    def __init__(self) -> None:
+        super().__init__()
+        self.upsert_calls: list[dict] = []
+        self.completed_jobs: list[int] = []
+
+    def insert_message_failure(self, **kwargs):
+        return None
+
+    def fail_message_ingest_job(self, *args, **kwargs):
+        return None
+
+    def retry_message_ingest_job(self, *args, **kwargs):
+        return None
+
+    def mark_message_ingest_job_completed(self, job_id: int):
+        self.completed_jobs.append(job_id)
+
+    def upsert_email_message_and_queue_evaluation(self, **kwargs):
+        self.upsert_calls.append(kwargs)
+        return (123, 456 if kwargs.get("queue_evaluation") else None)
+
+
 class FakeAssistantBridge:
     pass
 
 
 class FakeGmailClient:
-    def __init__(self, *, response=None, retryable=False):
+    def __init__(self, *, response=None, retryable=False, message=None):
         self._response = response
         self._retryable = retryable
+        self._message = message
 
     def list_history(self, refresh_token: str, start_history_id: int, label_id=None):
         if isinstance(self._response, Exception):
             raise self._response
         return self._response
+
+    def get_message(self, refresh_token: str, message_id: str):
+        if isinstance(self._message, Exception):
+            raise self._message
+        return self._message
 
     def is_auth_error(self, error: Exception) -> bool:
         return False
@@ -88,6 +121,9 @@ class FakeGmailClient:
 
     def is_retryable_error(self, error: Exception) -> bool:
         return self._retryable
+
+    def is_message_not_found(self, error: Exception) -> bool:
+        return False
 
 
 class GmailSyncServicePubSubDispositionTest(unittest.TestCase):
@@ -158,3 +194,66 @@ class GmailSyncServicePubSubDispositionTest(unittest.TestCase):
         self.assertEqual(db.last_history_id, 250)
         self.assertIn("queued_for_ingest", db.watch_statuses)
         self.assertIn("completed", db.sync_run_statuses)
+
+
+class GmailSyncServiceFreshnessTest(unittest.TestCase):
+    def _service(self, gmail_client: FakeGmailClient, db: FakeIngestDatabase) -> GmailSyncService:
+        account = AccountRuntime(
+            account_id=1,
+            email="user@example.com",
+            refresh_token="refresh-token",
+        )
+        return GmailSyncService(
+            settings=_settings(),
+            db=db,
+            gmail_client=gmail_client,
+            assistant_bridge=FakeAssistantBridge(),
+            accounts={"user@example.com": account},
+        )
+
+    def _message(self, age_hours: int) -> GmailMessage:
+        return GmailMessage(
+            message_id="gmail-message-1",
+            thread_id="gmail-thread-1",
+            sender_email="sender@example.com",
+            sender_name="Sender",
+            sender_domain="example.com",
+            to_recipients=[{"name": "User", "email": "user@example.com"}],
+            cc_recipients=[],
+            subject="Subject",
+            snippet="Snippet",
+            body_text="Body",
+            label_ids=["INBOX"],
+            headers={"subject": "Subject"},
+            message_internal_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=age_hours),
+            raw_size_bytes=100,
+        )
+
+    def _job(self) -> GmailIngestJob:
+        return GmailIngestJob(
+            id=10,
+            account_id=1,
+            gmail_message_id="gmail-message-1",
+            history_id=123,
+            watch_event_id=5,
+            sync_run_id=6,
+            attempt_count=1,
+        )
+
+    def test_recent_message_is_queued_for_assistant_evaluation(self) -> None:
+        db = FakeIngestDatabase()
+        service = self._service(FakeGmailClient(message=self._message(age_hours=2)), db)
+
+        service._process_ingest_job(self._job())
+
+        self.assertTrue(db.upsert_calls[0]["queue_evaluation"])
+        self.assertEqual(db.completed_jobs, [10])
+
+    def test_stale_message_is_stored_without_assistant_evaluation(self) -> None:
+        db = FakeIngestDatabase()
+        service = self._service(FakeGmailClient(message=self._message(age_hours=72)), db)
+
+        service._process_ingest_job(self._job())
+
+        self.assertFalse(db.upsert_calls[0]["queue_evaluation"])
+        self.assertEqual(db.completed_jobs, [10])

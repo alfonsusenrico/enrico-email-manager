@@ -357,6 +357,10 @@ class GmailSyncService:
 
         self._auth_backoff.reset(account.account_id)
 
+        should_queue_evaluation = self._should_queue_initial_evaluation(
+            gmail_message.message_internal_at
+        )
+
         try:
             self._db.upsert_email_message_and_queue_evaluation(
                 account_id=account.account_id,
@@ -364,13 +368,21 @@ class GmailSyncService:
                 gmail_message=gmail_message,
                 trigger_type="email.ingested",
                 trigger_reference=f"gmail_message_ingest_job:{job.id}",
+                queue_evaluation=should_queue_evaluation,
             )
             self._db.mark_message_ingest_job_completed(job.id)
-            logger.info(
-                "Canonical email stored for %s message %s",
-                account.email,
-                job.gmail_message_id,
-            )
+            if should_queue_evaluation:
+                logger.info(
+                    "Canonical email stored and queued for evaluation for %s message %s",
+                    account.email,
+                    job.gmail_message_id,
+                )
+            else:
+                logger.info(
+                    "Canonical email stored without evaluation queue for stale message %s on %s",
+                    job.gmail_message_id,
+                    account.email,
+                )
         except Exception as exc:
             error_text = str(exc)
             self._db.insert_message_failure(
@@ -598,6 +610,19 @@ class GmailSyncService:
             sync_status="auth_backoff",
             last_sync_error=error_text,
         )
+
+    def _should_queue_initial_evaluation(
+        self, message_internal_at: Optional[dt.datetime]
+    ) -> bool:
+        if message_internal_at is None:
+            return True
+
+        now = dt.datetime.now(dt.timezone.utc)
+        if message_internal_at.tzinfo is None:
+            message_internal_at = message_internal_at.replace(tzinfo=dt.timezone.utc)
+
+        age_seconds = (now - message_internal_at).total_seconds()
+        return age_seconds <= self._settings.assistant_max_email_age_seconds
 
     @staticmethod
     def _retry_delay_seconds(attempt_count: int, *, base_seconds: int) -> int:

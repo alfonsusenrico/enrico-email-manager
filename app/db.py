@@ -480,6 +480,7 @@ class Database:
         gmail_message: GmailMessage,
         trigger_type: str,
         trigger_reference: Optional[str],
+        queue_evaluation: bool = True,
     ) -> tuple[int, Optional[int]]:
         idempotency_key = f"{trigger_type}:{account_id}:{gmail_message.message_id}"
         with self.connect() as conn:
@@ -554,31 +555,33 @@ class Database:
                     raise RuntimeError("Failed to upsert canonical email message")
                 email_message_id = int(email_row[0])
 
-                cur.execute(
-                    """
-                    insert into assistant_evaluation_requests (
-                      email_message_id,
-                      trigger_type,
-                      trigger_reference,
-                      idempotency_key,
-                      payload_version,
-                      status,
-                      next_attempt_at,
-                      queued_at,
-                      updated_at
+                request_row = None
+                if queue_evaluation:
+                    cur.execute(
+                        """
+                        insert into assistant_evaluation_requests (
+                          email_message_id,
+                          trigger_type,
+                          trigger_reference,
+                          idempotency_key,
+                          payload_version,
+                          status,
+                          next_attempt_at,
+                          queued_at,
+                          updated_at
+                        )
+                        values (%s, %s, %s, %s, 'v1', 'queued', now(), now(), now())
+                        on conflict (idempotency_key) do nothing
+                        returning id
+                        """,
+                        (
+                            email_message_id,
+                            trigger_type,
+                            trigger_reference,
+                            idempotency_key,
+                        ),
                     )
-                    values (%s, %s, %s, %s, 'v1', 'queued', now(), now(), now())
-                    on conflict (idempotency_key) do nothing
-                    returning id
-                    """,
-                    (
-                        email_message_id,
-                        trigger_type,
-                        trigger_reference,
-                        idempotency_key,
-                    ),
-                )
-                request_row = cur.fetchone()
+                    request_row = cur.fetchone()
             conn.commit()
 
         return email_message_id, int(request_row[0]) if request_row else None

@@ -31,6 +31,7 @@ class Settings:
     assistant_dispatch_batch_size: int
     assistant_dispatch_poll_seconds: int
     assistant_dispatch_max_attempts: int
+    assistant_max_email_age_seconds: int
     ingest_worker_batch_size: int
     ingest_worker_poll_seconds: int
     ingest_worker_max_attempts: int
@@ -149,6 +150,10 @@ def load_settings() -> Settings:
         assistant_dispatch_max_attempts=_parse_int(
             os.getenv("ASSISTANT_DISPATCH_MAX_ATTEMPTS", "20"),
             "ASSISTANT_DISPATCH_MAX_ATTEMPTS",
+        ),
+        assistant_max_email_age_seconds=_parse_int(
+            os.getenv("ASSISTANT_MAX_EMAIL_AGE_SECONDS", "86400"),
+            "ASSISTANT_MAX_EMAIL_AGE_SECONDS",
         ),
         ingest_worker_batch_size=_parse_int(
             os.getenv("INGEST_WORKER_BATCH_SIZE", "25"),
