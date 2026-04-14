@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import os
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ class Settings:
     assistant_dispatch_poll_seconds: int
     assistant_dispatch_max_attempts: int
     assistant_max_email_age_seconds: int
+    assistant_min_message_internal_at: Optional[dt.datetime]
     ingest_worker_batch_size: int
     ingest_worker_poll_seconds: int
     ingest_worker_max_attempts: int
@@ -109,6 +111,16 @@ def _parse_bool(value: str, name: str) -> bool:
     raise ConfigError(f"{name} must be a boolean")
 
 
+def _parse_optional_datetime(value: str) -> Optional[dt.datetime]:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parsed = dt.datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
 def load_settings() -> Settings:
     assistant_dispatch_enabled = _parse_bool(
         os.getenv("ASSISTANT_DISPATCH_ENABLED", "true"),
@@ -154,6 +166,9 @@ def load_settings() -> Settings:
         assistant_max_email_age_seconds=_parse_int(
             os.getenv("ASSISTANT_MAX_EMAIL_AGE_SECONDS", "86400"),
             "ASSISTANT_MAX_EMAIL_AGE_SECONDS",
+        ),
+        assistant_min_message_internal_at=_parse_optional_datetime(
+            os.getenv("ASSISTANT_MIN_MESSAGE_INTERNAL_AT", "")
         ),
         ingest_worker_batch_size=_parse_int(
             os.getenv("INGEST_WORKER_BATCH_SIZE", "25"),

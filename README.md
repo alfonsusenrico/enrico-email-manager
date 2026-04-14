@@ -112,6 +112,7 @@ The design rationale and migration framing are documented in [docs/assistant-fir
 | `ASSISTANT_DISPATCH_POLL_SECONDS` | `3` | Sleep interval when no evaluation requests are pending |
 | `ASSISTANT_DISPATCH_MAX_ATTEMPTS` | `20` | Max delivery attempts before marking a request failed |
 | `ASSISTANT_MAX_EMAIL_AGE_SECONDS` | `86400` | Freshness gate for auto-surfacing newly ingested emails. Older backlog emails are still stored canonically, but they are not auto-queued as real-time assistant interruptions. |
+| `ASSISTANT_MIN_MESSAGE_INTERNAL_AT` | empty | Optional hard cutoff. If set, only emails with Gmail `internalDate` at or after this ISO timestamp are auto-queued for assistant evaluation. Older emails are still stored, but not surfaced. |
 | `INGEST_WORKER_BATCH_SIZE` | `25` | Max Gmail ingest jobs leased per poll |
 | `INGEST_WORKER_POLL_SECONDS` | `2` | Sleep interval when no ingest jobs are pending |
 | `INGEST_WORKER_MAX_ATTEMPTS` | `20` | Max Gmail fetch/persist attempts before marking a job failed |
@@ -147,6 +148,7 @@ Authorization: Bearer <ASSISTANT_SHARED_SECRET>
 
 - `ASSISTANT_DISPATCH_ENABLED=false`: safe bootstrap mode. Gmail watch, Pub/Sub sync, canonical email storage, and assistant request queueing stay active, but no outbound dispatch is attempted yet.
 - `ASSISTANT_MAX_EMAIL_AGE_SECONDS`: protects against historical backlog being surfaced as if it were a brand-new email. Older messages still land in `email_messages`, but they do not create real-time assistant interruptions during ingest.
+- `ASSISTANT_MIN_MESSAGE_INTERNAL_AT`: optional stronger cutoff for rollout moments like this one. Set it to “now” when you want a clean break so only genuinely new mail after that point is surfaced.
 - `ASSISTANT_DISPATCH_ENABLED=true`: full bridge mode. `email-manager` POSTs queued evaluation requests to OpenClaw and expects acknowledgement or callbacks.
 
 ## Running Migrations

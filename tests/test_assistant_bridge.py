@@ -27,6 +27,7 @@ def _settings() -> Settings:
         assistant_dispatch_poll_seconds=3,
         assistant_dispatch_max_attempts=20,
         assistant_max_email_age_seconds=86400,
+        assistant_min_message_internal_at=None,
         ingest_worker_batch_size=25,
         ingest_worker_poll_seconds=2,
         ingest_worker_max_attempts=20,

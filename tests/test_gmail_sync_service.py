@@ -28,6 +28,7 @@ def _settings() -> Settings:
         assistant_dispatch_poll_seconds=3,
         assistant_dispatch_max_attempts=20,
         assistant_max_email_age_seconds=86400,
+        assistant_min_message_internal_at=None,
         ingest_worker_batch_size=25,
         ingest_worker_poll_seconds=2,
         ingest_worker_max_attempts=20,
@@ -252,6 +253,34 @@ class GmailSyncServiceFreshnessTest(unittest.TestCase):
     def test_stale_message_is_stored_without_assistant_evaluation(self) -> None:
         db = FakeIngestDatabase()
         service = self._service(FakeGmailClient(message=self._message(age_hours=72)), db)
+
+        service._process_ingest_job(self._job())
+
+        self.assertFalse(db.upsert_calls[0]["queue_evaluation"])
+        self.assertEqual(db.completed_jobs, [10])
+
+    def test_message_older_than_manual_cutoff_is_not_queued(self) -> None:
+        db = FakeIngestDatabase()
+        settings = _settings()
+        settings = Settings(
+            **{
+                **settings.__dict__,
+                "assistant_min_message_internal_at": dt.datetime.now(dt.timezone.utc)
+                - dt.timedelta(hours=1),
+            }
+        )
+        account = AccountRuntime(
+            account_id=1,
+            email="user@example.com",
+            refresh_token="refresh-token",
+        )
+        service = GmailSyncService(
+            settings=settings,
+            db=db,
+            gmail_client=FakeGmailClient(message=self._message(age_hours=2)),
+            assistant_bridge=FakeAssistantBridge(),
+            accounts={"user@example.com": account},
+        )
 
         service._process_ingest_job(self._job())
 

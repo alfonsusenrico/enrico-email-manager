@@ -617,10 +617,16 @@ class GmailSyncService:
         if message_internal_at is None:
             return True
 
-        now = dt.datetime.now(dt.timezone.utc)
         if message_internal_at.tzinfo is None:
             message_internal_at = message_internal_at.replace(tzinfo=dt.timezone.utc)
+        else:
+            message_internal_at = message_internal_at.astimezone(dt.timezone.utc)
 
+        min_allowed = self._settings.assistant_min_message_internal_at
+        if min_allowed is not None and message_internal_at < min_allowed:
+            return False
+
+        now = dt.datetime.now(dt.timezone.utc)
         age_seconds = (now - message_internal_at).total_seconds()
         return age_seconds <= self._settings.assistant_max_email_age_seconds
 
